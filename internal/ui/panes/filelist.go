@@ -1,0 +1,543 @@
+package panes
+
+import (
+	"fmt"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/solessfir/lazyp4/internal/p4"
+)
+
+// ViewMode controls how files are displayed.
+type ViewMode int
+
+const (
+	ViewTree ViewMode = iota
+	ViewFlat
+)
+
+type rowKind int
+
+const (
+	rowKindHeader rowKind = iota
+	rowKindDir
+	rowKindFile
+)
+
+type row struct {
+	kind      rowKind
+	clIndex   int
+	fileIndex int    // rowKindFile only
+	dirKey    string // rowKindDir only - used as key in expanded map
+	depth     int    // indent level under CL header
+	label     string // display name (just the filename or dirname, not full path)
+}
+
+// FileListPane displays opened files grouped by changelist.
+type FileListPane struct {
+	changelists  []p4.Changelist
+	cursor       int
+	rows         []row
+	focused      bool
+	width        int
+	height       int
+	mode         ViewMode
+	expanded     map[string]bool // dirKey -> expanded
+	marked       map[string]bool // depotFile -> marked for partial submit
+	scrollOffset int             // first visible row index, updated during render
+}
+
+// Styles.
+var (
+	styleHeader = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("12"))
+
+	styleFileEdit = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("3")) // yellow
+
+	styleFileAdd = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("2")) // green
+
+	styleFileDelete = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("1")) // red
+
+	styleFileOther = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("7"))
+
+	styleDir = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("6")) // cyan
+
+	styleMarked = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("10")).Bold(true) // bright green
+
+	styleCursor = lipgloss.NewStyle().
+			Background(lipgloss.Color("8")).
+			Bold(true)
+
+	styleFocusBorder = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("12"))
+
+	styleBlurBorder = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("8"))
+)
+
+// NewFileListPane creates an empty pane in tree view mode.
+func NewFileListPane() *FileListPane {
+	return &FileListPane{
+		mode:     ViewTree,
+		expanded: map[string]bool{},
+		marked:   map[string]bool{},
+	}
+}
+
+// SetSize updates dimensions.
+func (p *FileListPane) SetSize(w, h int) {
+	p.width = w
+	p.height = h
+}
+
+// SetFocused toggles focus highlight.
+func (p *FileListPane) SetFocused(f bool) {
+	p.focused = f
+}
+
+// Mode returns the current view mode.
+func (p *FileListPane) Mode() ViewMode { return p.mode }
+
+// ToggleMode switches between tree and flat view.
+func (p *FileListPane) ToggleMode() {
+	if p.mode == ViewTree {
+		p.mode = ViewFlat
+	} else {
+		p.mode = ViewTree
+	}
+	p.rebuildRows()
+	if p.cursor >= len(p.rows) {
+		p.cursor = 0
+	}
+}
+
+// SetChangelists replaces the displayed data and rebuilds rows.
+func (p *FileListPane) markedCount() int {
+	n := 0
+	for _, v := range p.marked {
+		if v {
+			n++
+		}
+	}
+	return n
+}
+
+func (p *FileListPane) HasFiles() bool {
+	for _, cl := range p.changelists {
+		if len(cl.Files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *FileListPane) SetChangelists(cls []p4.Changelist) {
+	p.changelists = cls
+	p.rebuildRows()
+	if p.cursor >= len(p.rows) {
+		p.cursor = 0
+	}
+}
+
+func (p *FileListPane) rebuildRows() {
+	p.rows = nil
+	if p.mode == ViewFlat {
+		p.rebuildFlat()
+	} else {
+		p.rebuildTree()
+	}
+}
+
+func (p *FileListPane) rebuildFlat() {
+	for ci, cl := range p.changelists {
+		p.rows = append(p.rows, row{kind: rowKindHeader, clIndex: ci})
+		for fi, f := range cl.Files {
+			p.rows = append(p.rows, row{
+				kind:      rowKindFile,
+				clIndex:   ci,
+				fileIndex: fi,
+				label:     f.DepotFile,
+			})
+		}
+	}
+}
+
+func (p *FileListPane) rebuildTree() {
+	for ci, cl := range p.changelists {
+		p.rows = append(p.rows, row{kind: rowKindHeader, clIndex: ci})
+		root := buildFileTree(cl.Files)
+		p.flattenTree(root, ci, cl.ID, "", 0)
+	}
+}
+
+// treeNode is used transiently when building the tree.
+type treeNode struct {
+	name      string
+	isDir     bool
+	fileIndex int
+	children  []*treeNode
+}
+
+func buildFileTree(files []p4.OpenedFile) *treeNode {
+	root := &treeNode{isDir: true}
+	for i, f := range files {
+		rel := depotRelPath(f.DepotFile)
+		parts := strings.Split(rel, "/")
+		insertTreeNode(root, parts, i)
+	}
+	return root
+}
+
+func insertTreeNode(parent *treeNode, parts []string, fileIndex int) {
+	if len(parts) == 0 {
+		return
+	}
+	if len(parts) == 1 {
+		parent.children = append(parent.children, &treeNode{
+			name:      parts[0],
+			fileIndex: fileIndex,
+		})
+		return
+	}
+	for _, child := range parent.children {
+		if child.isDir && child.name == parts[0] {
+			insertTreeNode(child, parts[1:], fileIndex)
+			return
+		}
+	}
+	dir := &treeNode{name: parts[0], isDir: true}
+	parent.children = append(parent.children, dir)
+	insertTreeNode(dir, parts[1:], fileIndex)
+}
+
+func (p *FileListPane) flattenTree(node *treeNode, clIndex int, clID, parentPath string, depth int) {
+	for _, child := range node.children {
+		if child.isDir {
+			relPath := parentPath + child.name
+			dirKey := clID + ":" + relPath
+			if _, exists := p.expanded[dirKey]; !exists {
+				p.expanded[dirKey] = true // default expanded
+			}
+			p.rows = append(p.rows, row{
+				kind:    rowKindDir,
+				clIndex: clIndex,
+				dirKey:  dirKey,
+				depth:   depth,
+				label:   child.name,
+			})
+			if p.expanded[dirKey] {
+				p.flattenTree(child, clIndex, clID, relPath+"/", depth+1)
+			}
+		} else {
+			p.rows = append(p.rows, row{
+				kind:      rowKindFile,
+				clIndex:   clIndex,
+				fileIndex: child.fileIndex,
+				depth:     depth,
+				label:     child.name,
+			})
+		}
+	}
+}
+
+// SelectedFile returns the currently highlighted OpenedFile, or nil.
+func (p *FileListPane) SelectedFile() *p4.OpenedFile {
+	if len(p.rows) == 0 || p.cursor >= len(p.rows) {
+		return nil
+	}
+	r := p.rows[p.cursor]
+	if r.kind != rowKindFile {
+		return nil
+	}
+	return &p.changelists[r.clIndex].Files[r.fileIndex]
+}
+
+// MarkedFiles returns all files the user has marked for partial submit.
+func (p *FileListPane) MarkedFiles() []p4.OpenedFile {
+	var out []p4.OpenedFile
+	for ci, cl := range p.changelists {
+		for fi := range cl.Files {
+			f := p.changelists[ci].Files[fi]
+			if p.marked[f.DepotFile] {
+				out = append(out, f)
+			}
+		}
+	}
+	return out
+}
+
+// ClearMarks removes all marks.
+func (p *FileListPane) ClearMarks() {
+	p.marked = map[string]bool{}
+}
+
+// ScrollOffset returns the index of the first visible row (updated each render).
+func (p *FileListPane) ScrollOffset() int { return p.scrollOffset }
+
+// SetCursor moves the cursor to idx, clamped to valid range.
+func (p *FileListPane) SetCursor(idx int) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(p.rows) {
+		idx = len(p.rows) - 1
+	}
+	if idx >= 0 {
+		p.cursor = idx
+	}
+}
+
+// SelectedCL returns the CL ID of the row under the cursor.
+func (p *FileListPane) SelectedCL() string {
+	if len(p.rows) == 0 || p.cursor >= len(p.rows) {
+		return ""
+	}
+	return p.changelists[p.rows[p.cursor].clIndex].ID
+}
+
+// Init satisfies tea.Model.
+func (p *FileListPane) Init() tea.Cmd { return nil }
+
+// Update handles keyboard navigation within the pane.
+func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
+	switch m := msg.(type) {
+	case tea.KeyMsg:
+		switch m.String() {
+		case "j", "down":
+			if p.cursor < len(p.rows)-1 {
+				p.cursor++
+			}
+		case "k", "up":
+			if p.cursor > 0 {
+				p.cursor--
+			}
+		case "tab":
+			p.advanceToCLHeader()
+		case "enter":
+			p.toggleDir()
+		case " ":
+			p.toggleMark()
+		}
+	}
+	return nil
+}
+
+// toggleMark marks or unmarks the file under the cursor for partial submit.
+// On a directory row it marks/unmarks all files recursively within that directory.
+func (p *FileListPane) toggleMark() {
+	if p.cursor < 0 || p.cursor >= len(p.rows) {
+		return
+	}
+	r := p.rows[p.cursor]
+	if r.kind == rowKindDir {
+		p.toggleMarkDir(r)
+		return
+	}
+	if r.kind == rowKindFile {
+		f := p.changelists[r.clIndex].Files[r.fileIndex]
+		p.marked[f.DepotFile] = !p.marked[f.DepotFile]
+	}
+}
+
+// toggleMarkDir marks or unmarks all files under the given directory row.
+// If all files in the dir are already marked, it unmarks them; otherwise marks all.
+func (p *FileListPane) toggleMarkDir(r row) {
+	cl := p.changelists[r.clIndex]
+	// dirKey = "clID:relPath" — extract relPath and append "/" to scope the prefix
+	prefix := strings.TrimPrefix(r.dirKey, cl.ID+":") + "/"
+
+	allMarked := true
+	count := 0
+	for _, f := range cl.Files {
+		if strings.HasPrefix(depotRelPath(f.DepotFile), prefix) {
+			count++
+			if !p.marked[f.DepotFile] {
+				allMarked = false
+			}
+		}
+	}
+	if count == 0 {
+		return
+	}
+	newVal := !allMarked
+	for _, f := range cl.Files {
+		if strings.HasPrefix(depotRelPath(f.DepotFile), prefix) {
+			p.marked[f.DepotFile] = newVal
+		}
+	}
+}
+
+// toggleDir expands or collapses the directory under the cursor.
+func (p *FileListPane) toggleDir() {
+	if p.cursor < 0 || p.cursor >= len(p.rows) {
+		return
+	}
+	r := p.rows[p.cursor]
+	if r.kind != rowKindDir {
+		return
+	}
+	savedKey := r.dirKey
+	p.expanded[savedKey] = !p.expanded[savedKey]
+	p.rebuildRows()
+	for i, row := range p.rows {
+		if row.dirKey == savedKey {
+			p.cursor = i
+			break
+		}
+	}
+}
+
+// advanceToCLHeader moves the cursor to the next CL header row.
+func (p *FileListPane) advanceToCLHeader() {
+	for i := p.cursor + 1; i < len(p.rows); i++ {
+		if p.rows[i].kind == rowKindHeader {
+			p.cursor = i
+			return
+		}
+	}
+	for i := 0; i < p.cursor; i++ {
+		if p.rows[i].kind == rowKindHeader {
+			p.cursor = i
+			return
+		}
+	}
+}
+
+// View renders the pane content.
+func (p *FileListPane) View() string {
+	border := styleBlurBorder
+	if p.focused {
+		border = styleFocusBorder
+	}
+	innerW := p.width - 2
+	innerH := p.height - 2
+	if innerW < 1 {
+		innerW = 1
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+	rendered := border.Width(innerW).Height(innerH).Render(p.renderLines(innerW, innerH))
+	result := injectTitle(rendered, "1", "Files", p.width, p.focused)
+	if n := p.markedCount(); n > 0 {
+		result = injectFooter(result, fmt.Sprintf("*%d", n), p.focused)
+	}
+	return result
+}
+
+func (p *FileListPane) renderLines(innerW, innerH int) string {
+	if len(p.rows) == 0 {
+		return styleFileOther.Render("No open files")
+	}
+
+	cursorW := innerW  // full content width for cursor highlight
+	innerW -= 2       // right margin so text doesn't touch the border
+	if innerW < 1 {
+		innerW = 40
+	}
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	start := 0
+	if p.cursor >= innerH {
+		start = p.cursor - innerH + 1
+	}
+	p.scrollOffset = start
+	end := start + innerH
+	if end > len(p.rows) {
+		end = len(p.rows)
+	}
+
+	var sb strings.Builder
+	for i := start; i < end; i++ {
+		r := p.rows[i]
+		var line string
+
+		switch r.kind {
+		case rowKindHeader:
+			cl := p.changelists[r.clIndex]
+			label := fmt.Sprintf("CL %s (%d files)", cl.ID, len(cl.Files))
+			line = styleHeader.Render(label)
+
+		case rowKindDir:
+			indent := strings.Repeat("  ", r.depth)
+			icon := "▶"
+			if p.expanded[r.dirKey] {
+				icon = "▼"
+			}
+			line = styleDir.Render(fmt.Sprintf("%s%s %s/", indent, icon, r.label))
+
+		case rowKindFile:
+			indent := strings.Repeat("  ", r.depth)
+			f := p.changelists[r.clIndex].Files[r.fileIndex]
+			actionTag := fmt.Sprintf("[%s]", f.Action)
+			name := r.label
+			if p.mode == ViewFlat {
+				name = shortName(f.DepotFile, innerW-len(actionTag)-2)
+			}
+			marker := "  "
+			if p.marked[f.DepotFile] {
+				marker = "* "
+			}
+			raw := fmt.Sprintf("%s%s%s %s", indent, marker, actionTag, name)
+			var fileStyle lipgloss.Style
+			switch f.Action {
+			case p4.ActionEdit:
+				fileStyle = styleFileEdit
+			case p4.ActionAdd:
+				fileStyle = styleFileAdd
+			case p4.ActionDelete:
+				fileStyle = styleFileDelete
+			default:
+				fileStyle = styleFileOther
+			}
+			if p.marked[f.DepotFile] {
+				line = styleMarked.Render(raw)
+			} else {
+				line = fileStyle.Render(raw)
+			}
+		}
+
+		if i == p.cursor {
+			line = styleCursor.Width(cursorW).Render(line)
+		}
+		sb.WriteString(line)
+		if i < end-1 {
+			sb.WriteByte('\n')
+		}
+	}
+	return sb.String()
+}
+
+// depotRelPath strips "//depot-name/" from a depot path.
+func depotRelPath(depotFile string) string {
+	trimmed := strings.TrimPrefix(depotFile, "//")
+	idx := strings.Index(trimmed, "/")
+	if idx == -1 {
+		return trimmed
+	}
+	return trimmed[idx+1:]
+}
+
+// shortName truncates path to maxLen chars, prefixing with "...".
+func shortName(path string, maxLen int) string {
+	if maxLen <= 0 {
+		return path
+	}
+	if len(path) <= maxLen {
+		return path
+	}
+	return "..." + path[len(path)-maxLen+3:]
+}
