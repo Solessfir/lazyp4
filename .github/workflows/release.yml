@@ -30,12 +30,6 @@ jobs:
           tar -czf dist/lazyp4-linux-amd64.tar.gz -C dist lazyp4
           rm dist/lazyp4
 
-      - name: Build Linux (arm64)
-        run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/lazyp4 ./cmd/main.go
-          tar -czf dist/lazyp4-linux-arm64.tar.gz -C dist lazyp4
-          rm dist/lazyp4
-
       - name: Build Windows (amd64)
         run: |
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/lazyp4.exe ./cmd/main.go
