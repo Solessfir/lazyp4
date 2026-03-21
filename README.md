@@ -24,9 +24,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 ## Installation
 
-```bash
-go install github.com/solessfir/lazyp4/cmd/lazyp4@latest
-```
+Download the latest binary from [releases](https://github.com/Solessfir/lazyp4/releases).
 
 Or build from source:
 
@@ -52,21 +50,24 @@ Environment variables `P4PORT`, `P4USER`, and `P4CLIENT` override the config fil
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate up/down |
+| `j` / `k` | Navigate up / down |
+| `h` / `l` or `←` / `→` | Cycle pane focus left / right |
+| `1` – `4` | Jump to pane: Files / History / Diff / Log |
+| `tab` | Cycle pane focus forward |
+| `esc` | Back to Files pane |
 | `enter` | Expand / collapse directory |
-| `space` | Mark file (or all files in directory) for partial submit |
-| `tab` | Cycle pane focus |
-| `2` / `3` / `4` | Focus Files / History / Diff pane |
+| `space` | Mark / unmark file (or whole directory) for partial submit |
+| `s` | Submit — opens description prompt; uses marked files if any |
+| `d` | Discard (revert) — confirmation prompt; uses marked files if any |
+| `S` | Sync with progress bar |
+| `c` | Cancel current operation (sync or submit) |
 | `f` | Fetch — dry-run sync, shows pending file count |
-| `s` | Sync |
-| `S` | Shelve selected changelist |
-| `c` | Submit (opens description prompt) |
-| `r` | Refresh |
-| `l` | File log for selected file |
-| `R` | Show conflicts |
+| `r` | Refresh file list |
 | `t` | Toggle tree / flat view |
-| `q` | Quit |
+| `L` | File log for selected file |
+| `R` | Show conflicts |
 | `?` | Keybindings help |
+| `q` | Quit |
 
 ## Disclaimer
 
