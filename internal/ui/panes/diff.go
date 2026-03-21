@@ -81,7 +81,7 @@ func (p *DiffPane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.viewport.View())
-	return injectTitle(rendered, "3", "Diff", p.width, p.focused)
+	return injectTitle(rendered, "5", "Diff", p.width, p.focused)
 }
 
 // colorize applies ANSI colors to unified diff lines.

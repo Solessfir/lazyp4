@@ -68,9 +68,25 @@ func (p *ResolvePane) Update(msg tea.Msg) tea.Cmd {
 			}
 		case "enter":
 			return p.openMergeTool()
+		case "a":
+			return p.autoResolve("-at", "-ab")
+		case "y":
+			return p.autoResolve("-ay")
+		case "s":
+			return p.autoResolve("-as")
 		}
 	}
 	return nil
+}
+
+// autoResolve returns a ResolveAutoMsg.
+// Multiple flags are tried in order; the first that succeeds wins.
+// Resolves all pending files (no specific file arg) to avoid path issues with cross-stream conflicts.
+func (p *ResolvePane) autoResolve(flags ...string) tea.Cmd {
+	if len(p.conflicts) == 0 {
+		return nil
+	}
+	return func() tea.Msg { return ResolveAutoMsg{Flags: flags} }
 }
 
 // openMergeTool launches $P4MERGE or $EDITOR for the selected conflict.
@@ -89,12 +105,19 @@ func (p *ResolvePane) openMergeTool() tea.Cmd {
 	}
 
 	return tea.ExecProcess(exec.Command(tool, file), func(err error) tea.Msg {
-		return resolveFinishedMsg{err: err}
+		return ResolveFinishedMsg{Err: err}
 	})
 }
 
-// resolveFinishedMsg is sent after the merge tool exits.
-type resolveFinishedMsg struct{ err error }
+// ResolveFinishedMsg is sent after the merge tool exits.
+type ResolveFinishedMsg struct{ Err error }
+
+// ResolveAutoMsg is sent when the user triggers an auto-resolve action.
+// Flags are tried in order until one succeeds.
+// File is empty to resolve all pending conflicts at once.
+type ResolveAutoMsg struct {
+	Flags []string // e.g. ["-at", "-ab"] — first applicable flag wins
+}
 
 // View renders the pane.
 func (p *ResolvePane) View() string {
@@ -111,7 +134,7 @@ func (p *ResolvePane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.renderLines(innerH))
-	return injectTitle(rendered, "3", "Conflicts", p.width, p.focused)
+	return injectTitle(rendered, "5", "Conflicts", p.width, p.focused)
 }
 
 func (p *ResolvePane) renderLines(maxH int) string {
@@ -126,7 +149,7 @@ func (p *ResolvePane) renderLines(maxH int) string {
 		}
 		label := fmt.Sprintf("  %s", shortName(c.ClientFile, p.width-6))
 		var line string
-		if i == p.cursor {
+		if i == p.cursor && p.focused {
 			line = styleCursor.Width(p.width - 4).Render(styleConflict.Render(label))
 		} else {
 			line = styleConflict.Render(label)

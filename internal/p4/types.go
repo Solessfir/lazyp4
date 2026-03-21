@@ -15,12 +15,13 @@ const (
 
 // OpenedFile is a file currently open in a changelist.
 type OpenedFile struct {
-	DepotFile  string
-	ClientFile string
-	Action     Action
-	Type       string
-	Change     string // changelist number, or "default"
-	Revision   int
+	DepotFile    string
+	ClientFile   string
+	Action       Action
+	Type         string
+	Change       string // changelist number, or "default"
+	Revision     int
+	NeedsResolve bool // true when p4 opened reports "unresolved" flag
 }
 
 // Changelist groups opened files under a single CL.
@@ -45,8 +46,9 @@ type FilelogEntry struct {
 	Rev         int
 	Change      string
 	Action      Action
-	Date        string
+	Date        string // formatted as "2006-01-02 15:04"
 	Author      string
+	Client      string // workspace name
 	Description string
 }
 
@@ -58,9 +60,32 @@ type ConflictFile struct {
 	EndRev     int
 }
 
+// ShelvedFile is a file stored in a shelved changelist.
+type ShelvedFile struct {
+	DepotFile string
+	Action    Action
+}
+
+// ShelvedCL is a changelist with shelved files.
+type ShelvedCL struct {
+	ID          string
+	Description string
+	User        string
+	Files       []ShelvedFile
+}
+
+// StreamInfo represents a single stream from p4 streams.
+type StreamInfo struct {
+	Path   string // e.g. //depot/main
+	Parent string // e.g. //depot/main or "none"
+	Type   string // mainline, development, release, virtual, task
+	Name   string // short name
+}
+
 // WorkspaceInfo contains basic info from p4 info.
 type WorkspaceInfo struct {
 	Client     string // workspace/client name
 	Stream     string // client stream path (e.g. //depot/main), empty if not stream client
 	ServerAddr string
+	Root       string // local root path of the workspace
 }

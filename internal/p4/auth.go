@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -47,6 +48,10 @@ func KeyringSet(p4user, password string) error {
 // receives a prompt string and returns the entered password (or an error).
 // Returns an error only when login ultimately fails.
 func (c *Client) EnsureLoggedIn(promptFn func(prompt string) (string, error)) error {
+	if _, err := exec.LookPath("p4"); err != nil {
+		return fmt.Errorf("p4 executable not found in PATH - please install the Perforce CLI")
+	}
+
 	if c.TicketValid() {
 		return nil
 	}

@@ -59,7 +59,7 @@ func spliceLine(x int, fg, bg string) string {
 	// Right: bg from column x+fgW, without ANSI (reset before to avoid bleed).
 	right := ansiSkip(bg, x+fgW)
 
-	return left + fg + "\033[0m" + right
+	return left + "\033[0m" + fg + "\033[0m" + right
 }
 
 // ansiTruncate truncates s to maxWidth visible columns, preserving ANSI sequences.

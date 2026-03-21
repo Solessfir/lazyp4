@@ -5,16 +5,32 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// IsConnectionError returns true if err indicates the p4 server is unreachable.
+func IsConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "Connect to server failed") ||
+		strings.Contains(s, "TCP connect to") ||
+		strings.Contains(s, "check $P4PORT")
+}
 
 // Client wraps p4 CLI invocations.
 type Client struct {
-	Port   string
-	User   string
+	Port      string
+	User      string
 	Workspace string
+	Root      string   // local root of the current workspace; used as CWD for commands that require it
+	Stream    string   // current stream path e.g. //depot/main
 }
 
 // globalFlags returns the p4 global flags (-p, -u, -c).
@@ -114,12 +130,13 @@ func (c *Client) OpenedFiles() ([]OpenedFile, error) {
 	for _, r := range records {
 		rev, _ := strconv.Atoi(r["rev"])
 		files = append(files, OpenedFile{
-			DepotFile:  r["depotFile"],
-			ClientFile: r["clientFile"],
-			Action:     Action(r["action"]),
-			Type:       r["type"],
-			Change:     r["change"],
-			Revision:   rev,
+			DepotFile:    r["depotFile"],
+			ClientFile:   r["clientFile"],
+			Action:       Action(r["action"]),
+			Type:         r["type"],
+			Change:       r["change"],
+			Revision:     rev,
+			NeedsResolve: false, // set by caller via ResolveList cross-reference
 		})
 	}
 	return files, nil
@@ -141,8 +158,13 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 		byID[id].Files = append(byID[id].Files, f)
 	}
 	result := make([]Changelist, 0, len(order))
+	if cl, ok := byID["default"]; ok {
+		result = append(result, *cl)
+	}
 	for _, id := range order {
-		result = append(result, *byID[id])
+		if id != "default" {
+			result = append(result, *byID[id])
+		}
 	}
 	return result
 }
@@ -169,32 +191,48 @@ func (c *Client) Sync() (string, error) {
 	return c.run("sync")
 }
 
+// SyncToCL syncs the workspace to a specific changelist.
+// For stream depots pass the stream path (e.g. "//depot/main"); for classic depots pass "".
+func (c *Client) SyncToCL(streamPath, cl string) error {
+	var target string
+	if streamPath != "" {
+		target = streamPath + "/...@" + cl
+	} else {
+		target = "@" + cl // syncs entire workspace client view to CL
+	}
+	_, err := c.run("sync", target)
+	return err
+}
+
 // SyncStreaming runs p4 sync and sends each output line to lines as it arrives.
 func (c *Client) SyncStreaming(ctx context.Context, lines chan<- string) error {
 	return c.streamCommand(ctx, lines, append(c.globalFlags(), "sync")...)
 }
 
-// Shelve shelves all files in the given changelist.
+// Shelve shelves all files in a changelist.
+// For the default changelist pass "" or "default"; p4 does not accept -c default,
+// so we use bare `p4 shelve` (no flags) which shelves the entire default CL.
 func (c *Client) Shelve(clID string) (string, error) {
+	if clID == "" || clID == "default" {
+		return c.run("shelve")
+	}
 	return c.run("shelve", "-c", clID)
+}
+
+// ShelveFiles shelves specific files from a changelist.
+func (c *Client) ShelveFiles(clID string, clientFiles []string) (string, error) {
+	args := append([]string{"shelve", "-c", clID}, clientFiles...)
+	return c.run(args...)
 }
 
 // Submit submits the given changelist.
 func (c *Client) Submit(clID, description string) (string, error) {
-	if description != "" {
-		return c.run("submit", "-d", description, "-c", clID)
-	}
 	return c.run("submit", "-c", clID)
 }
 
 // SubmitStreaming submits a changelist and streams output lines into lines.
 func (c *Client) SubmitStreaming(ctx context.Context, clID, description string, lines chan<- string) error {
-	args := c.globalFlags()
-	if description != "" {
-		args = append(args, "submit", "-d", description, "-c", clID)
-	} else {
-		args = append(args, "submit", "-c", clID)
-	}
+	args := append(c.globalFlags(), "submit", "-c", clID)
 	return c.streamCommand(ctx, lines, args...)
 }
 
@@ -219,6 +257,8 @@ func (c *Client) streamCommand(ctx context.Context, lines chan<- string, args ..
 	if err != nil {
 		return err
 	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -234,7 +274,13 @@ func (c *Client) streamCommand(ctx context.Context, lines chan<- string, args ..
 			}
 		}
 	}
-	return cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return err
+	}
+	return nil
 }
 
 // RevertFiles discards local changes for the given files in a single p4 revert call.
@@ -243,9 +289,66 @@ func (c *Client) RevertFiles(clientFiles []string) (string, error) {
 	return c.run(args...)
 }
 
+// PendingDescriptions returns a map of CL ID → description for all pending CLs.
+func (c *Client) PendingDescriptions() (map[string]string, error) {
+	args := []string{"changes", "-s", "pending", "-l"}
+	if c.Workspace != "" {
+		args = append(args, "-c", c.Workspace)
+	}
+	out, err := c.runZtag(args...)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]string{}
+	for _, r := range parseZtag(out) {
+		if id := r["change"]; id != "" {
+			m[id] = strings.TrimSpace(r["desc"])
+		}
+	}
+	return m, nil
+}
+
+// FindCLByDescription searches pending CLs for one whose description contains the given text.
+// Returns the CL ID, or "" if not found.
+func (c *Client) FindCLByDescription(desc string) (string, error) {
+	args := []string{"changes", "-s", "pending", "-l"}
+	if c.Workspace != "" {
+		args = append(args, "-c", c.Workspace)
+	}
+	out, err := c.runZtag(args...)
+	if err != nil {
+		return "", err
+	}
+	descLower := strings.ToLower(desc)
+	for _, r := range parseZtag(out) {
+		clDesc := strings.ToLower(strings.TrimSpace(r["desc"]))
+		if strings.Contains(clDesc, descLower) {
+			return r["change"], nil
+		}
+	}
+	return "", nil
+}
+
+// ReopenFiles moves the given files to a different changelist.
+func (c *Client) ReopenFiles(clID string, clientFiles []string) (string, error) {
+	args := append([]string{"reopen", "-c", clID}, clientFiles...)
+	return c.run(args...)
+}
+
+// RevertCL reverts all files in the given changelist.
+func (c *Client) RevertCL(clID string) (string, error) {
+	return c.run("revert", "-c", clID, "//...")
+}
+
 // Reopen moves a file to a different changelist.
 func (c *Client) Reopen(clID, clientFile string) (string, error) {
 	return c.run("reopen", "-c", clID, clientFile)
+}
+
+// DeleteChange deletes an empty pending changelist.
+func (c *Client) DeleteChange(clID string) error {
+	_, err := c.run("change", "-d", clID)
+	return err
 }
 
 // CreateChange creates a new pending changelist and returns its ID.
@@ -282,7 +385,7 @@ func (c *Client) SubmitMarked(files []OpenedFile, description string) error {
 // Filelog returns revision history for a depot file.
 // Pass max > 0 to limit results (p4 filelog -m max).
 func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
-	args := []string{"filelog"}
+	args := []string{"filelog", "-l"}
 	if max > 0 {
 		args = append(args, "-m", strconv.Itoa(max))
 	}
@@ -294,23 +397,60 @@ func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
 	records := parseZtag(out)
 	entries := make([]FilelogEntry, 0, len(records))
 	for _, r := range records {
+		if r["change0"] == "" {
+			continue // record has no visible revisions (e.g. limit exhausted)
+		}
 		rev, _ := strconv.Atoi(r["rev0"])
+		date := r["time0"]
+		if ts, err := strconv.ParseInt(date, 10, 64); err == nil {
+			date = time.Unix(ts, 0).Format("2006-01-02 15:04")
+		}
 		entries = append(entries, FilelogEntry{
 			DepotFile:   r["depotFile"],
 			Rev:         rev,
 			Change:      r["change0"],
 			Action:      Action(r["action0"]),
-			Date:        r["time0"],
+			Date:        date,
 			Author:      r["user0"],
+			Client:      r["client0"],
 			Description: strings.TrimSpace(r["desc0"]),
 		})
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		ci, _ := strconv.Atoi(entries[i].Change)
+		cj, _ := strconv.Atoi(entries[j].Change)
+		return ci > cj
+	})
 	return entries, nil
 }
 
 // ResolveList returns files that need resolving.
-func (c *Client) ResolveList() ([]ConflictFile, error) {
-	out, err := c.run("resolve", "-n")
+// AutoResolve tries each flag in order until one succeeds.
+// If clientFile is non-empty it resolves that file only; otherwise all pending resolves.
+func (c *Client) AutoResolve(clientFile string, flags []string) error {
+	var lastErr error
+	for _, flag := range flags {
+		args := []string{"resolve", flag}
+		if clientFile != "" {
+			args = append(args, clientFile)
+		}
+		if _, err := c.run(args...); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// ResolveList returns files needing resolve. If path is non-empty, only that
+// file or folder (use "//depot/path/...") is checked.
+func (c *Client) ResolveList(path string) ([]ConflictFile, error) {
+	args := []string{"resolve", "-n"}
+	if path != "" {
+		args = append(args, path)
+	}
+	out, err := c.run(args...)
 	if err != nil {
 		// p4 resolve -n exits non-zero when nothing to resolve on some servers
 		if strings.Contains(err.Error(), "No file(s) to resolve") {
@@ -318,19 +458,33 @@ func (c *Client) ResolveList() ([]ConflictFile, error) {
 		}
 		return nil, err
 	}
+	// p4 resolve -n formats:
+	//   //depot/file - merging //depot/other#1,2
+	//   //depot/file - branch resolve from //depot/other#1,2
+	//   //depot/file - delete from //depot/other#1
+	//   //depot/file - vs //depot/other#1
+	//   //depot/file - action resolve from //depot/other#1
+	separators := []string{" - merging ", " - branch resolve from ", " - resolving branch from ", " - delete from ", " - vs ", " - action resolve from "}
 	var conflicts []ConflictFile
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		// Format: //depot/file - merging //depot/file#1,2
-		parts := strings.SplitN(line, " - merging ", 2)
-		if len(parts) == 2 {
-			conflicts = append(conflicts, ConflictFile{
-				ClientFile: parts[0],
-				FromFile:   parts[1],
-			})
+		matched := false
+		for _, sep := range separators {
+			if parts := strings.SplitN(line, sep, 2); len(parts) == 2 {
+				conflicts = append(conflicts, ConflictFile{
+					ClientFile: parts[0],
+					FromFile:   parts[1],
+				})
+				matched = true
+				break
+			}
+		}
+		// Unrecognised line — surface it raw so the user sees it.
+		if !matched {
+			conflicts = append(conflicts, ConflictFile{ClientFile: line})
 		}
 	}
 	return conflicts, nil
@@ -351,7 +505,224 @@ func (c *Client) Info() (WorkspaceInfo, error) {
 		Client:     r["clientName"],
 		Stream:     r["clientStream"],
 		ServerAddr: r["serverAddress"],
+		Root:       r["clientRoot"],
 	}, nil
+}
+
+// DepotFromStream extracts the depot wildcard path from a stream path, e.g. "//depot/main" -> "//depot/...".
+func DepotFromStream(streamPath string) string {
+	trimmed := strings.TrimPrefix(streamPath, "//")
+	if idx := strings.Index(trimmed, "/"); idx >= 0 {
+		return "//" + trimmed[:idx] + "/..."
+	}
+	return streamPath
+}
+
+// Streams returns all streams under the depot inferred from the current workspace stream.
+// depotPath should be e.g. "//testdepot/..." (use "*" for depot wildcard).
+func (c *Client) Streams(depotPath string) ([]StreamInfo, error) {
+	out, err := c.runZtag("streams", depotPath)
+	if err != nil {
+		return nil, err
+	}
+	records := parseZtag(out)
+	result := make([]StreamInfo, 0, len(records))
+	for _, r := range records {
+		path := r["Stream"]
+		if path == "" {
+			continue
+		}
+		result = append(result, StreamInfo{
+			Path:   path,
+			Parent: r["Parent"],
+			Type:   r["Type"],
+			Name:   r["Name"],
+		})
+	}
+	return result, nil
+}
+
+// ShelvedCLs returns changelists with shelved files for the current workspace.
+func (c *Client) ShelvedCLs() ([]ShelvedCL, error) {
+	args := []string{"changes", "-s", "shelved"}
+	if c.Workspace != "" {
+		args = append(args, "-c", c.Workspace)
+	}
+	out, err := c.runZtag(args...)
+	if err != nil {
+		return nil, err
+	}
+	records := parseZtag(out)
+	var cls []ShelvedCL
+	for _, r := range records {
+		clID := r["change"]
+		if clID == "" {
+			continue
+		}
+		files, _ := c.shelvedFiles(clID)
+		cls = append(cls, ShelvedCL{
+			ID:          clID,
+			Description: strings.TrimSpace(r["desc"]),
+			User:        r["user"],
+			Files:       files,
+		})
+	}
+	return cls, nil
+}
+
+func (c *Client) shelvedFiles(clID string) ([]ShelvedFile, error) {
+	out, err := c.runZtag("describe", "-s", "-S", clID)
+	if err != nil {
+		return nil, err
+	}
+	records := parseZtag(out)
+	if len(records) == 0 {
+		return nil, nil
+	}
+	r := records[0]
+	var files []ShelvedFile
+	for i := 0; ; i++ {
+		path := r[fmt.Sprintf("depotFile%d", i)]
+		if path == "" {
+			break
+		}
+		files = append(files, ShelvedFile{
+			DepotFile: path,
+			Action:    Action(r[fmt.Sprintf("action%d", i)]),
+		})
+	}
+	return files, nil
+}
+
+// UnshelveAndDelete unshelves files from a CL back into the workspace and deletes the shelf.
+// When c.Stream is set, passes -S <stream> so files are mapped through the stream graph,
+// enabling cross-stream unshelve (e.g. shelf from main unshelved into dev).
+// If files were unshelved but p4 also reports an error (e.g. needs resolve), the shelf is
+// preserved and the error is returned so the user can resolve before re-trying.
+func (c *Client) UnshelveAndDelete(clID string) error {
+	args := append(c.globalFlags(), "unshelve", "-s", clID)
+	if c.Stream != "" {
+		args = append(args, "-S", c.Stream)
+	}
+	cmd := exec.Command("p4", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	out := stdout.String() + stderr.String()
+	unshelved := strings.Contains(out, " - unshelved")
+	needsResolve := strings.Contains(out, "needs resolve")
+
+	if runErr != nil && !unshelved {
+		return fmt.Errorf("unshelve: %s: %s", runErr, strings.TrimSpace(stderr.String()))
+	}
+	if !unshelved {
+		return fmt.Errorf("no files unshelved — shelf was preserved")
+	}
+	if needsResolve {
+		// Files are open but require resolve before the shelf can be deleted.
+		return fmt.Errorf("files unshelved with conflicts — shelf kept, delete manually after resolving")
+	}
+	if _, err := c.run("shelve", "-d", "-c", clID); err != nil {
+		if strings.Contains(err.Error(), "needs resolve") || strings.Contains(err.Error(), "Shelve aborted") {
+			return fmt.Errorf("files unshelved with conflicts — shelf kept, delete manually after resolving")
+		}
+		return fmt.Errorf("delete shelf: %w", err)
+	}
+	return nil
+}
+
+// DeleteShelf deletes the shelved files from a CL without unshelving.
+func (c *Client) DeleteShelf(clID string) error {
+	_, err := c.run("shelve", "-d", "-c", clID)
+	return err
+}
+
+// ForceSyncPath runs p4 sync -f on the given depot path (file or wildcard).
+func (c *Client) ForceSyncPath(depotPath string) (string, error) {
+	return c.run("sync", "-f", depotPath)
+}
+
+// WhereLocal converts a depot path to a local filesystem path using p4 where.
+func (c *Client) WhereLocal(depotPath string) (string, error) {
+	out, err := c.run("where", depotPath)
+	if err != nil {
+		return "", err
+	}
+	// Output: //depot/path //client/path /local/path
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) < 3 {
+		return "", fmt.Errorf("unexpected where output: %s", out)
+	}
+	return fields[2], nil
+}
+
+// Reconcile runs p4 reconcile on the given path to detect offline changes.
+func (c *Client) Reconcile(path string) (string, error) {
+	return c.run("reconcile", path)
+}
+
+// BrowserDirs lists immediate subdirectories at the given wildcard path (e.g. "//depot/stream/*").
+func (c *Client) BrowserDirs(wildcard string) ([]string, error) {
+	out, err := c.run("dirs", wildcard)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "no files") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var dirs []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			dirs = append(dirs, line)
+		}
+	}
+	return dirs, nil
+}
+
+// BrowserHaveFiles lists files synced in the workspace at the given wildcard (non-recursive).
+func (c *Client) BrowserHaveFiles(wildcard string) ([]string, error) {
+	out, err := c.run("have", wildcard)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "not on client") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		if idx := strings.Index(line, "#"); idx > 0 {
+			files = append(files, line[:idx])
+		}
+	}
+	return files, nil
+}
+
+// BrowserDepotFiles lists all non-deleted depot files at the given wildcard (non-recursive).
+func (c *Client) BrowserDepotFiles(wildcard string) ([]string, error) {
+	out, err := c.run("files", "-e", wildcard)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such file") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line = strings.TrimSpace(line); line == "" {
+			continue
+		}
+		if idx := strings.Index(line, "#"); idx > 0 {
+			files = append(files, line[:idx])
+		}
+	}
+	return files, nil
 }
 
 // SyncDryRun runs p4 sync -n and returns the number of files that would be updated.
@@ -371,6 +742,51 @@ func (c *Client) SyncDryRun() (int, error) {
 		}
 	}
 	return count, nil
+}
+
+// WorkspacesForStream returns client names owned by the current user that are
+// configured for the given stream path (e.g. "//depot/dev").
+func (c *Client) WorkspacesForStream(streamPath string) ([]string, error) {
+	args := []string{"clients", "-S", streamPath}
+	if c.User != "" {
+		args = append(args, "-u", c.User)
+	}
+	out, err := c.runZtag(args...)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, r := range parseZtag(out) {
+		if name := r["client"]; name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// SwitchToStream switches the current workspace to the given stream using
+// `p4 switch`.  When no workspace for that stream exists the server creates
+// one based on the current client spec (requires p4 2021.1+).
+// p4 switch validates that CWD is under the client root, so we must run it
+// from there; if the root doesn't exist yet we create it first.
+func (c *Client) SwitchToStream(streamPath string) error {
+	dir := c.Root
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			dir = "" // fall back to inherited CWD
+		}
+	}
+	cmd := exec.Command("p4", append(c.globalFlags(), "switch", streamPath)...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // IsAuthError returns true when output indicates an expired/invalid ticket.

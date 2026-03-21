@@ -92,5 +92,5 @@ func (p *CmdLogPane) View() string {
 		innerW = 1
 	}
 	rendered := border.Width(innerW).Height(CmdLogHeight - 2).Render(p.viewport.View())
-	return injectTitle(rendered, "4", "Log", p.width, p.focused)
+	return injectTitle(rendered, "6", "Log", p.width, p.focused)
 }

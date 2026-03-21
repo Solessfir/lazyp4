@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
 
 	"github.com/solessfir/lazyp4/internal/config"
 	"github.com/solessfir/lazyp4/internal/p4"
@@ -27,6 +28,10 @@ func main() {
 
 	// Trust server fingerprint if needed (safe to call every time).
 	if err := client.Trust(); err != nil {
+		if p4.IsConnectionError(err) {
+			fmt.Fprintf(os.Stderr, "error: cannot connect to Perforce server (%v)\n", err)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "warning: p4 trust failed: %v\n", err)
 	}
 
@@ -53,10 +58,10 @@ func main() {
 	}
 }
 
-// terminalPrompt reads a password from the terminal before the TUI starts.
+// terminalPrompt reads a password from the terminal with hidden input.
 func terminalPrompt(prompt string) (string, error) {
 	fmt.Print(prompt)
-	var pw string
-	_, err := fmt.Scanln(&pw)
-	return pw, err
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	return string(pw), err
 }

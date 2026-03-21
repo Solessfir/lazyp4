@@ -3,6 +3,7 @@ package panes
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -47,6 +48,10 @@ type FileListPane struct {
 	expanded     map[string]bool // dirKey -> expanded
 	marked       map[string]bool // depotFile -> marked for partial submit
 	scrollOffset int             // first visible row index, updated during render
+	filterMode   bool
+	filter       string
+	filterCursor int
+	filteredIdxs []int // indices into p.rows that match current filter
 }
 
 // Styles.
@@ -106,6 +111,20 @@ func (p *FileListPane) SetFocused(f bool) {
 	p.focused = f
 }
 
+func (p *FileListPane) InFilterMode() bool { return p.filterMode }
+
+func (p *FileListPane) HasFilter() bool { return p.filter != "" }
+
+func (p *FileListPane) ClearFilter() {
+	if len(p.filteredIdxs) > 0 && p.filterCursor < len(p.filteredIdxs) {
+		p.cursor = p.filteredIdxs[p.filterCursor]
+	}
+	p.filter = ""
+	p.filterMode = false
+	p.filterCursor = 0
+	p.filteredIdxs = nil
+}
+
 // Mode returns the current view mode.
 func (p *FileListPane) Mode() ViewMode { return p.mode }
 
@@ -132,6 +151,8 @@ func (p *FileListPane) markedCount() int {
 	}
 	return n
 }
+
+func (p *FileListPane) Changelists() []p4.Changelist { return p.changelists }
 
 func (p *FileListPane) HasFiles() bool {
 	for _, cl := range p.changelists {
@@ -253,10 +274,14 @@ func (p *FileListPane) flattenTree(node *treeNode, clIndex int, clID, parentPath
 
 // SelectedFile returns the currently highlighted OpenedFile, or nil.
 func (p *FileListPane) SelectedFile() *p4.OpenedFile {
-	if len(p.rows) == 0 || p.cursor >= len(p.rows) {
+	if len(p.rows) == 0 {
 		return nil
 	}
-	r := p.rows[p.cursor]
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return nil
+	}
+	r := p.rows[cur]
 	if r.kind != rowKindFile {
 		return nil
 	}
@@ -285,6 +310,15 @@ func (p *FileListPane) ClearMarks() {
 // ScrollOffset returns the index of the first visible row (updated each render).
 func (p *FileListPane) ScrollOffset() int { return p.scrollOffset }
 
+// PreferredHeight returns the preferred height based on content (for dynamic layout).
+func (p *FileListPane) PreferredHeight() int {
+	h := len(p.rows) + 2 // +2 for borders
+	if h < 4 {
+		h = 4
+	}
+	return h
+}
+
 // SetCursor moves the cursor to idx, clamped to valid range.
 func (p *FileListPane) SetCursor(idx int) {
 	if idx < 0 {
@@ -298,12 +332,97 @@ func (p *FileListPane) SetCursor(idx int) {
 	}
 }
 
-// SelectedCL returns the CL ID of the row under the cursor.
-func (p *FileListPane) SelectedCL() string {
-	if len(p.rows) == 0 || p.cursor >= len(p.rows) {
+// SelectedDepotPath returns the depot path for the current row:
+// - file: exact depot path
+// - dir or CL header: depot prefix with /... wildcard (for filelog)
+// Returns "" if nothing is selected.
+func (p *FileListPane) SelectedDepotPath() string {
+	if len(p.rows) == 0 {
 		return ""
 	}
-	return p.changelists[p.rows[p.cursor].clIndex].ID
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return ""
+	}
+	r := p.rows[cur]
+	switch r.kind {
+	case rowKindFile:
+		return p.changelists[r.clIndex].Files[r.fileIndex].DepotFile
+	case rowKindDir:
+		// dirKey is "clID:rel/path" - extract the depot prefix from any file in that CL
+		cl := p.changelists[r.clIndex]
+		if len(cl.Files) == 0 {
+			return ""
+		}
+		// build depot base from first file: strip everything after second "/"
+		depotFile := cl.Files[0].DepotFile // e.g. //depot/stream/rel/path
+		trimmed := strings.TrimPrefix(depotFile, "//")
+		idx := strings.Index(trimmed, "/")
+		if idx == -1 {
+			return ""
+		}
+		depotBase := "//" + trimmed[:idx+1] // e.g. //depot/
+		// dirKey format: "clID:rel/path"
+		colonIdx := strings.Index(r.dirKey, ":")
+		if colonIdx == -1 {
+			return ""
+		}
+		relDir := r.dirKey[colonIdx+1:]
+		return depotBase + relDir + "/..."
+	case rowKindHeader:
+		cl := p.changelists[r.clIndex]
+		if len(cl.Files) == 0 {
+			return ""
+		}
+		depotFile := cl.Files[0].DepotFile
+		trimmed := strings.TrimPrefix(depotFile, "//")
+		idx := strings.Index(trimmed, "/")
+		if idx == -1 {
+			return ""
+		}
+		// go one more level for stream depot: //depot/stream/...
+		rest := trimmed[idx+1:]
+		idx2 := strings.Index(rest, "/")
+		if idx2 == -1 {
+			return "//" + trimmed + "/..."
+		}
+		return "//" + trimmed[:idx+1+idx2] + "/..."
+	}
+	return ""
+}
+
+// FilesForCL returns all opened files belonging to the given CL ID.
+func (p *FileListPane) FilesForCL(clID string) []p4.OpenedFile {
+	for _, cl := range p.changelists {
+		if cl.ID == clID {
+			return cl.Files
+		}
+	}
+	return nil
+}
+
+// IsOnCLHeader returns true when the cursor is on a changelist header row.
+func (p *FileListPane) IsOnCLHeader() bool {
+	if len(p.rows) == 0 {
+		return false
+	}
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return false
+	}
+	return p.rows[cur].kind == rowKindHeader
+}
+
+// SelectedCL returns the CL ID of the row under the cursor.
+func (p *FileListPane) SelectedCL() string {
+	if len(p.rows) == 0 {
+		return ""
+	}
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return ""
+	}
+	return p.changelists[p.rows[cur].clIndex].ID
 }
 
 // Init satisfies tea.Model.
@@ -313,13 +432,60 @@ func (p *FileListPane) Init() tea.Cmd { return nil }
 func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
+		if p.filterMode {
+			switch m.String() {
+			case "esc":
+				p.ClearFilter()
+				return nil
+			case "enter", "/":
+				p.filterMode = false
+				return nil
+			case "j", "down":
+				if p.filterCursor < len(p.filteredIdxs)-1 {
+					p.filterCursor++
+				}
+				return nil
+			case "k", "up":
+				if p.filterCursor > 0 {
+					p.filterCursor--
+				}
+				return nil
+			case "backspace", "ctrl+h":
+				if len(p.filter) > 0 {
+					_, size := utf8.DecodeLastRuneInString(p.filter)
+					p.filter = p.filter[:len(p.filter)-size]
+					p.buildFilteredIdxs()
+					p.filterCursor = 0
+				}
+				return nil
+			default:
+				if len(m.Runes) == 1 {
+					p.filter += string(m.Runes)
+					p.buildFilteredIdxs()
+					p.filterCursor = 0
+				}
+				return nil
+			}
+		}
+		if m.String() == "/" {
+			p.filterMode = true
+			return nil
+		}
 		switch m.String() {
 		case "j", "down":
-			if p.cursor < len(p.rows)-1 {
+			if p.filter != "" {
+				if p.filterCursor < len(p.filteredIdxs)-1 {
+					p.filterCursor++
+				}
+			} else if p.cursor < len(p.rows)-1 {
 				p.cursor++
 			}
 		case "k", "up":
-			if p.cursor > 0 {
+			if p.filter != "" {
+				if p.filterCursor > 0 {
+					p.filterCursor--
+				}
+			} else if p.cursor > 0 {
 				p.cursor--
 			}
 		case "tab":
@@ -398,6 +564,44 @@ func (p *FileListPane) toggleDir() {
 	}
 }
 
+// buildFilteredIdxs populates p.filteredIdxs with indices of rows matching p.filter.
+func (p *FileListPane) buildFilteredIdxs() {
+	p.filteredIdxs = nil
+	if p.filter == "" {
+		return
+	}
+	// first pass: find matching file rows per CL
+	matchingCLs := map[int]bool{}
+	for _, r := range p.rows {
+		if r.kind == rowKindFile && fuzzyMatch(p.filter, r.label) {
+			matchingCLs[r.clIndex] = true
+		}
+	}
+	// second pass: include header + matching files
+	for i, r := range p.rows {
+		switch r.kind {
+		case rowKindHeader:
+			if matchingCLs[r.clIndex] {
+				p.filteredIdxs = append(p.filteredIdxs, i)
+			}
+		case rowKindFile:
+			if fuzzyMatch(p.filter, r.label) {
+				p.filteredIdxs = append(p.filteredIdxs, i)
+			}
+		}
+	}
+}
+
+// activeCursor returns the effective cursor index into p.rows accounting for filter.
+func (p *FileListPane) activeCursor() int {
+	if p.filter != "" && len(p.filteredIdxs) > 0 {
+		if p.filterCursor < len(p.filteredIdxs) {
+			return p.filteredIdxs[p.filterCursor]
+		}
+	}
+	return p.cursor
+}
+
 // advanceToCLHeader moves the cursor to the next CL header row.
 func (p *FileListPane) advanceToCLHeader() {
 	for i := p.cursor + 1; i < len(p.rows); i++ {
@@ -429,7 +633,7 @@ func (p *FileListPane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.renderLines(innerW, innerH))
-	result := injectTitle(rendered, "1", "Files", p.width, p.focused)
+	result := injectTitle(rendered, "2", "Pending", p.width, p.focused)
 	if n := p.markedCount(); n > 0 {
 		result = injectFooter(result, fmt.Sprintf("*%d", n), p.focused)
 	}
@@ -441,8 +645,8 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 		return styleFileOther.Render("No open files")
 	}
 
-	cursorW := innerW  // full content width for cursor highlight
-	innerW -= 2       // right margin so text doesn't touch the border
+	cursorW := innerW // full content width for cursor highlight
+	innerW -= 2      // right margin so text doesn't touch the border
 	if innerW < 1 {
 		innerW = 40
 	}
@@ -450,25 +654,54 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 		innerH = 1
 	}
 
+	showFilterBar := p.filterMode || p.filter != ""
+	contentH := innerH
+	if showFilterBar {
+		contentH = innerH - 1
+		if contentH < 0 {
+			contentH = 0
+		}
+	}
+
+	// Determine the effective row list and cursor.
+	var displayIdxs []int
+	var activeCur int
+	if p.filter != "" {
+		displayIdxs = p.filteredIdxs
+		activeCur = p.filterCursor
+	} else {
+		displayIdxs = make([]int, len(p.rows))
+		for i := range p.rows {
+			displayIdxs[i] = i
+		}
+		activeCur = p.cursor
+	}
+
+	// Scroll so activeCur is visible.
 	start := 0
-	if p.cursor >= innerH {
-		start = p.cursor - innerH + 1
+	if activeCur >= contentH {
+		start = activeCur - contentH + 1
 	}
 	p.scrollOffset = start
-	end := start + innerH
-	if end > len(p.rows) {
-		end = len(p.rows)
+	end := start + contentH
+	if end > len(displayIdxs) {
+		end = len(displayIdxs)
 	}
 
 	var sb strings.Builder
-	for i := start; i < end; i++ {
+	for pos := start; pos < end; pos++ {
+		i := displayIdxs[pos]
 		r := p.rows[i]
 		var line string
 
 		switch r.kind {
 		case rowKindHeader:
 			cl := p.changelists[r.clIndex]
-			label := fmt.Sprintf("CL %s (%d files)", cl.ID, len(cl.Files))
+			label := fmt.Sprintf("CL %s", cl.ID)
+			if cl.Description != "" {
+				label += "  " + cl.Description
+			}
+			label += fmt.Sprintf("  (%d files)", len(cl.Files))
 			line = styleHeader.Render(label)
 
 		case rowKindDir:
@@ -483,6 +716,9 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 			indent := strings.Repeat("  ", r.depth)
 			f := p.changelists[r.clIndex].Files[r.fileIndex]
 			actionTag := fmt.Sprintf("[%s]", f.Action)
+			if f.NeedsResolve {
+				actionTag = "[?] " + actionTag
+			}
 			name := r.label
 			if p.mode == ViewFlat {
 				name = shortName(f.DepotFile, innerW-len(actionTag)-2)
@@ -510,14 +746,23 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 			}
 		}
 
-		if i == p.cursor {
+		if pos == activeCur && p.focused {
 			line = styleCursor.Width(cursorW).Render(line)
 		}
 		sb.WriteString(line)
-		if i < end-1 {
+		if pos < end-1 {
 			sb.WriteByte('\n')
 		}
 	}
+
+	if showFilterBar {
+		filterBar := styleFilterBar.Render("/ " + p.filter)
+		if sb.Len() > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(filterBar)
+	}
+
 	return sb.String()
 }
 

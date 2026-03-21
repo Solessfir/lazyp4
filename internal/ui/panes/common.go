@@ -6,6 +6,23 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var styleFilterBar = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+
+func fuzzyMatch(pattern, s string) bool {
+	if pattern == "" {
+		return true
+	}
+	s = strings.ToLower(s)
+	pattern = strings.ToLower(pattern)
+	pi := 0
+	for i := 0; i < len(s) && pi < len(pattern); i++ {
+		if s[i] == pattern[pi] {
+			pi++
+		}
+	}
+	return pi == len(pattern)
+}
+
 // InjectTitle replaces the top border line of a rendered lipgloss box with
 // a lazygit-style titled border: ╭───[N]─Name──────────╮
 func InjectTitle(rendered, num, name string, paneWidth int, focused bool) string {

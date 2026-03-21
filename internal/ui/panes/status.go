@@ -17,21 +17,24 @@ var (
 	styleStatusArrow   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleStatusName    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	styleStatusStream  = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+	styleStatusOffline = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 )
 
 // StatusPane displays workspace info and pending sync count.
 type StatusPane struct {
-	info     p4.WorkspaceInfo
-	pending  int  // -1 = not yet fetched
+	info    p4.WorkspaceInfo
+	pending int  // -1 = not yet fetched
 	fetching bool // fetch in progress
-	width    int
+	offline  bool
+	width   int
 }
 
 func NewStatusPane() *StatusPane {
 	return &StatusPane{pending: -1}
 }
 
-func (p *StatusPane) SetWidth(w int) { p.width = w }
+func (p *StatusPane) SetWidth(w int)        { p.width = w }
+func (p *StatusPane) CurrentStream() string { return p.info.Stream }
 
 func (p *StatusPane) SetInfo(info p4.WorkspaceInfo) { p.info = info }
 
@@ -41,6 +44,11 @@ func (p *StatusPane) SetPending(n int) {
 }
 
 func (p *StatusPane) SetFetching() { p.fetching = true }
+
+func (p *StatusPane) SetOffline(offline bool) {
+	p.offline = offline
+	p.fetching = false
+}
 
 func (p *StatusPane) View() string {
 	innerW := p.width - 2
@@ -52,6 +60,13 @@ func (p *StatusPane) View() string {
 }
 
 func (p *StatusPane) line() string {
+	if p.offline {
+		offlineBadge := styleStatusOffline.Render("OFFLINE")
+		if p.info.Client != "" {
+			return offlineBadge + " " + styleStatusArrow.Render("—") + " " + styleStatusName.Render(p.info.Client)
+		}
+		return offlineBadge + " " + styleStatusArrow.Render("p4 server unreachable")
+	}
 	if p.fetching {
 		return styleStatusArrow.Render("Fetching...")
 	}

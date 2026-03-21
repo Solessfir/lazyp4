@@ -1,6 +1,6 @@
 module github.com/solessfir/lazyp4
 
-go 1.22
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.4.0
@@ -28,6 +28,7 @@ require (
 	github.com/muesli/termenv v0.15.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/sync v0.9.0 // indirect
-	golang.org/x/sys v0.27.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.3.8 // indirect
 )

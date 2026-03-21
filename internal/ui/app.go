@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -19,11 +21,13 @@ import (
 type activePane int
 
 const (
-	paneFileList activePane = iota
+	paneBrowser activePane = iota
+	paneFileList
+	paneStreams
+	paneShelved
 	paneDiff
 	paneLog
 	paneResolve
-	paneMiniLog
 	paneCmdLog
 )
 
@@ -34,8 +38,44 @@ type submitModal struct {
 	files   []p4.OpenedFile // non-empty = marked files submit
 }
 
+type confirmKind int
+
+const (
+	confirmKindRevert confirmKind = iota
+	confirmKindDeleteShelf
+)
+
 type confirmModal struct {
-	files []string // client files to revert
+	kind  confirmKind
+	files []string // for revert
+	clID  string   // for delete shelf
+}
+
+// shelveDescModal is shown when shelving files from the default CL so the user can name the new CL.
+type shelveDescModal struct {
+	input    textinput.Model
+	files    []p4.OpenedFile // files to move to new CL, then shelve+revert
+	noRevert bool
+}
+
+// moveCLModal is shown when the user wants to move files to a different CL.
+type moveCLModal struct {
+	input textinput.Model
+	files []p4.OpenedFile
+}
+
+// checkoutModal is shown when the user wants to sync the workspace to a specific CL.
+type checkoutModal struct {
+	cl        string // target CL number
+	stream    string // stream root path
+	hasFiles  bool   // true = open files exist, show shelve prompt first
+	shelving  bool   // true = currently in "shelve then sync" phase
+}
+
+// streamSwitchModal tracks an in-progress p4 switch invocation.
+type streamSwitchModal struct {
+	stream    string // target stream path
+	switching bool   // p4 switch in flight
 }
 
 func newSubmitModal(clID string, files []p4.OpenedFile) *submitModal {
@@ -63,9 +103,15 @@ type logDoneMsg struct {
 	err     error
 }
 
-type miniLogDoneMsg struct {
-	entries []p4.FilelogEntry
-	err     error
+type browserLoadedMsg struct {
+	parentPath string
+	dirs       []string
+	files      []string
+}
+
+type browserSearchDoneMsg struct {
+	files []string
+	err   error
 }
 
 type conflictsDoneMsg struct {
@@ -87,6 +133,11 @@ type infoFetchedMsg struct {
 	err  error
 }
 
+type streamsFetchedMsg struct {
+	streams []p4.StreamInfo
+	err     error
+}
+
 type fetchDoneMsg struct {
 	count int
 	err   error
@@ -94,10 +145,62 @@ type fetchDoneMsg struct {
 
 type tickMsg time.Time
 
+type shelveDoneMsg struct {
+	count int
+	clID  string // non-empty when a whole CL was shelved
+	err   error
+}
+
+type shelvedDoneMsg struct {
+	cls []p4.ShelvedCL
+	err error
+}
+
+type unshelveDeleteDoneMsg struct {
+	clID string
+	err  error
+}
+
+type deleteShelfDoneMsg struct {
+	clID string
+	err  error
+}
+
 type syncDryDoneMsg struct {
 	total int
 	err   error
 }
+
+type forceSyncDoneMsg struct {
+	path string
+	err  error
+}
+
+type reconcileDoneMsg struct {
+	path string
+	err  error
+}
+
+type openFileDoneMsg struct {
+	err error
+}
+
+type moveDoneMsg struct {
+	count int
+	clID  string
+	err   error
+}
+
+type syncToCLDoneMsg struct {
+	cl  string
+	err error
+}
+
+type streamSwitchedMsg struct {
+	stream string
+	err    error
+}
+
 type opLineMsg struct{ line string }
 type opEndMsg struct{ err error }
 
@@ -114,48 +217,64 @@ type App struct {
 	opDone    int
 	opCancel  context.CancelFunc
 	opCh      chan string
-	statusPane    *panes.StatusPane
-	fileList      *panes.FileListPane
-	diff          *panes.DiffPane
-	log           *panes.LogPane
-	miniLog       *panes.LogPane
-	resolve       *panes.ResolvePane
-	cmdLog        *panes.CmdLogPane
+	statusPane  *panes.StatusPane
+	browserPane *panes.BrowserPane
+	fileList    *panes.FileListPane
+	streamsPane *panes.StreamsPane
+	shelvedPane *panes.ShelvedPane
+	diff        *panes.DiffPane
+	log         *panes.LogPane
+	resolve     *panes.ResolvePane
+	cmdLog      *panes.CmdLogPane
+
+	streams          []p4.StreamInfo
+	showStreams       bool   // true when stream depot with >1 stream
+	isStreamDepot    bool   // false = classic depot (no streams)
+	browserNavTarget string // pending nav-to path after filter clear
+	historyMode      bool   // true = show History pane at bottom-right, false = Diff
+	offlineMode      bool   // true = p4 server unreachable
 
 	width  int
 	height int
 
 	status       string
 	modal        *submitModal
+	shelveModal  *shelveDescModal
+	moveModal    *moveCLModal
 	confirm      *confirmModal
+	checkout     *checkoutModal
+	streamSwitch *streamSwitchModal
 	showHelp     bool
+	selectMode   bool // mouse disabled so terminal can select text
 	helpViewport viewport.Model
 }
 
 // New creates the root App model.
 func New(client *p4.Client, fetchInterval time.Duration) *App {
 	hv := viewport.New(54, 20)
-	hv.SetContent(helpContent())
 	a := &App{
 		client:        client,
 		fetchInterval: fetchInterval,
-		active:        paneFileList,
-		statusPane:    panes.NewStatusPane(),
-		fileList:      panes.NewFileListPane(),
-		diff:          panes.NewDiffPane(),
-		log:           panes.NewLogPane("3", "Log"),
-		miniLog:       panes.NewLogPane("2", "History"),
-		resolve:       panes.NewResolvePane(),
-		cmdLog:        panes.NewCmdLogPane(),
+		active:        paneBrowser,
+		statusPane:  panes.NewStatusPane(),
+		browserPane: panes.NewBrowserPane(),
+		fileList:    panes.NewFileListPane(),
+		streamsPane: panes.NewStreamsPane(),
+		shelvedPane: panes.NewShelvedPane(),
+		diff:        panes.NewDiffPane(),
+		log:         panes.NewLogPane("5", "History"),
+		resolve:     panes.NewResolvePane(),
+		cmdLog:      panes.NewCmdLogPane(),
 		helpViewport:  hv,
 	}
+	a.historyMode = true
 	a.updateFocus()
 	return a
 }
 
 // Init triggers the first data load and workspace info fetch.
 func (a *App) Init() tea.Cmd {
-	cmds := []tea.Cmd{a.refresh(), a.cmdInfo(), a.cmdFetch()}
+	cmds := []tea.Cmd{a.refresh(), a.cmdInfo(), a.cmdFetch(), a.cmdLoadShelved()}
 	if a.fetchInterval > 0 {
 		cmds = append(cmds, tea.Tick(a.fetchInterval, func(t time.Time) tea.Msg { return tickMsg(t) }))
 	}
@@ -164,20 +283,107 @@ func (a *App) Init() tea.Cmd {
 
 // Update is the main message handler.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Stream-switch modal captures key input when open; async result messages
+	// must still fall through to the main switch so they are not dropped.
+	if a.streamSwitch != nil {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			return a.handleStreamSwitchKey(m)
+		}
+	}
+
+	// Checkout modal captures all input when open.
+	if a.checkout != nil {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			co := a.checkout
+			switch m.String() {
+			case "esc", "ctrl+c", "n", "N":
+				a.checkout = nil
+				a.status = "Cancelled"
+			case "enter", "y", "Y":
+				if co.hasFiles && !co.shelving {
+					// User chose to shelve first
+					co.shelving = true
+					return a, a.cmdShelveForCheckout(co)
+				}
+				// No open files, or shelve done: sync now
+				a.checkout = nil
+				return a, a.cmdSyncToCL(co.stream, co.cl)
+			case "s", "S":
+				if co.hasFiles && !co.shelving {
+					// Skip shelve, sync directly
+					a.checkout = nil
+					return a, a.cmdSyncToCL(co.stream, co.cl)
+				}
+			}
+		}
+		return a, nil
+	}
+
 	// Confirm modal captures all input when open.
 	if a.confirm != nil {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			switch m.String() {
 			case "enter":
-				files := a.confirm.files
+				c := a.confirm
 				a.confirm = nil
-				return a, a.cmdRevert(files)
+				switch c.kind {
+				case confirmKindRevert:
+					return a, a.cmdRevert(c.files)
+				case confirmKindDeleteShelf:
+					return a, a.cmdDeleteShelf(c.clID)
+				}
 			case "esc", "ctrl+c", "n", "N":
 				a.confirm = nil
 				a.status = "Cancelled"
 			}
 		}
 		return a, nil
+	}
+
+	// Move CL modal captures all input when open.
+	if a.moveModal != nil {
+		switch m := msg.(type) {
+		case tea.KeyMsg:
+			switch m.String() {
+			case "enter":
+				return a, a.execMoveToCL()
+			case "esc", "ctrl+c":
+				a.moveModal = nil
+				a.status = "Cancelled"
+				return a, nil
+			default:
+				var cmd tea.Cmd
+				a.moveModal.input, cmd = a.moveModal.input.Update(msg)
+				return a, cmd
+			}
+		default:
+			var cmd tea.Cmd
+			a.moveModal.input, cmd = a.moveModal.input.Update(msg)
+			return a, cmd
+		}
+	}
+
+	// Shelve description modal captures all input when open.
+	if a.shelveModal != nil {
+		switch m := msg.(type) {
+		case tea.KeyMsg:
+			switch m.String() {
+			case "enter":
+				return a, a.execShelveWithDesc()
+			case "esc", "ctrl+c":
+				a.shelveModal = nil
+				a.status = "Cancelled"
+				return a, nil
+			default:
+				var cmd tea.Cmd
+				a.shelveModal.input, cmd = a.shelveModal.input.Update(msg)
+				return a, cmd
+			}
+		default:
+			var cmd tea.Cmd
+			a.shelveModal.input, cmd = a.shelveModal.input.Update(msg)
+			return a, cmd
+		}
 	}
 
 	// Modal captures all input when open.
@@ -222,12 +428,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshDoneMsg:
 		if m.err != nil {
-			a.status = "refresh error: " + m.err.Error()
+			if p4.IsConnectionError(m.err) {
+				a.setOffline(true)
+			} else {
+				a.status = "refresh error: " + m.err.Error()
+			}
 			a.cmdLog.Add("p4 opened", "error: "+m.err.Error())
 		} else {
+			a.setOffline(false)
 			a.fileList.SetChangelists(m.cls)
 			a.status = fmt.Sprintf("Loaded %d changelists", len(m.cls))
 			a.cmdLog.Add("p4 opened", fmt.Sprintf("%d changelists", len(m.cls)))
+			a.relayout() // pending height changes
+			if f := a.fileList.SelectedFile(); f != nil {
+				var cmds []tea.Cmd
+				cmds = append(cmds, a.cmdDiff(f.ClientFile))
+				// Only refresh history from Pending if the user is actively in that pane,
+				// otherwise the browser-driven history load takes priority.
+				if a.historyMode && a.active == paneFileList {
+					cmds = append(cmds, a.cmdFilelog(f.DepotFile))
+				}
+				return a, tea.Batch(cmds...)
+			}
 		}
 		return a, nil
 
@@ -244,14 +466,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "filelog error: " + m.err.Error()
 		} else {
 			a.log.SetEntries(m.entries)
-			a.active = paneLog
-			a.updateFocus()
-		}
-		return a, nil
-
-	case miniLogDoneMsg:
-		if m.err == nil {
-			a.miniLog.SetEntries(m.entries)
 		}
 		return a, nil
 
@@ -260,10 +474,32 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "resolve error: " + m.err.Error()
 		} else {
 			a.resolve.SetConflicts(m.conflicts)
-			a.active = paneResolve
+			if len(m.conflicts) == 0 {
+				a.status = "all conflicts resolved"
+				a.active = paneFileList
+			} else {
+				a.status = ""
+				a.active = paneResolve
+			}
 			a.updateFocus()
 		}
-		return a, nil
+		return a, a.refresh()
+
+	case panes.ResolveFinishedMsg:
+		if m.Err != nil {
+			a.status = "merge tool error: " + m.Err.Error()
+		}
+		return a, a.cmdResolveList("")
+
+	case panes.ResolveAutoMsg:
+		return a, func() tea.Msg {
+			if err := a.client.AutoResolve("", m.Flags); err != nil {
+				a.cmdLog.Add("p4 resolve", "error: "+err.Error())
+				return statusMsg{"auto-resolve failed — see log"}
+			}
+			conflicts, err := a.client.ResolveList("")
+			return conflictsDoneMsg{conflicts: conflicts, err: err}
+		}
 
 	case statusMsg:
 		a.status = m.text
@@ -295,6 +531,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case opEndMsg:
 		opName := a.opName
 		opDone := a.opDone
+		opTotal := a.opTotal
 		a.opRunning = false
 		a.opCancel = nil
 		a.opCh = nil
@@ -307,13 +544,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = opName + " cancelled"
 			a.cmdLog.Add(p4cmd, "cancelled")
 		} else {
-			a.status = fmt.Sprintf("%s complete (%d files)", opName, opDone)
-			a.cmdLog.Add(p4cmd, fmt.Sprintf("%d files", opDone))
+			fileCount := opDone
+			if opName == "Submitting" {
+				fileCount = opTotal
+			}
+			a.status = fmt.Sprintf("%s complete (%d files)", opName, fileCount)
+			a.cmdLog.Add(p4cmd, fmt.Sprintf("%d files", fileCount))
 		}
 		if opName == "Submitting" {
 			a.fileList.ClearMarks()
 		}
 		cmds = append(cmds, a.refresh())
+		if opName == "Syncing" {
+			a.statusPane.SetFetching()
+			cmds = append(cmds, a.cmdFetch())
+		}
 		return a, tea.Batch(cmds...)
 
 	case revertDoneMsg:
@@ -331,23 +576,199 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.fileList.ClearMarks()
 		return a, a.refresh()
 
-	case infoFetchedMsg:
+	case shelveDoneMsg:
+		if m.err != nil {
+			a.status = "shelve failed: " + m.err.Error()
+			a.cmdLog.Add("p4 shelve", "error: "+m.err.Error())
+		} else if m.clID != "" {
+			a.status = fmt.Sprintf("Shelved CL %s", m.clID)
+			a.cmdLog.Add("p4 shelve", fmt.Sprintf("CL %s", m.clID))
+		} else {
+			a.status = fmt.Sprintf("Shelved %d file(s)", m.count)
+			a.cmdLog.Add("p4 shelve", fmt.Sprintf("%d files", m.count))
+		}
+		a.fileList.ClearMarks()
+		return a, tea.Batch(a.refresh(), a.cmdLoadShelved())
+
+	case shelvedDoneMsg:
 		if m.err == nil {
+			a.shelvedPane.SetCLs(m.cls)
+			a.relayout() // update pending height too
+		}
+		return a, nil
+
+	case unshelveDeleteDoneMsg:
+		if m.err != nil {
+			a.status = "unshelve failed: " + m.err.Error()
+			a.cmdLog.Add("p4 unshelve", "error: "+m.err.Error())
+		} else {
+			a.status = fmt.Sprintf("CL %s unshelved", m.clID)
+			a.cmdLog.Add("p4 unshelve", fmt.Sprintf("CL %s", m.clID))
+		}
+		return a, tea.Batch(a.refresh(), a.cmdLoadShelved())
+
+	case deleteShelfDoneMsg:
+		if m.err != nil {
+			a.status = "delete shelf failed: " + m.err.Error()
+			a.cmdLog.Add("p4 shelve -d", "error: "+m.err.Error())
+		} else {
+			a.status = fmt.Sprintf("Shelf %s deleted", m.clID)
+			a.cmdLog.Add("p4 shelve -d", fmt.Sprintf("CL %s", m.clID))
+		}
+		return a, a.cmdLoadShelved()
+
+	case infoFetchedMsg:
+		if m.err != nil && p4.IsConnectionError(m.err) {
+			a.setOffline(true)
+			return a, nil
+		}
+		if m.err == nil {
+			a.client.Root = m.info.Root
+			a.client.Stream = m.info.Stream
 			a.statusPane.SetInfo(m.info)
+			var cmds []tea.Cmd
+			if m.info.Stream != "" {
+				a.isStreamDepot = true
+				cmds = append(cmds, a.cmdStreams(m.info.Stream))
+				a.browserPane.SetRoot(m.info.Stream)
+				cmds = append(cmds, a.cmdBrowserLoad(m.info.Stream, a.browserPane.Mode()))
+				cmds = append(cmds, a.cmdBrowserSearch(m.info.Stream, a.browserPane.Mode()))
+				if a.historyMode {
+					cmds = append(cmds, a.cmdFilelogMax(m.info.Stream+"/...", 100))
+				}
+			} else {
+				// Classic depot: no streams, use // as browser root.
+				// Skip search index (//... could be enormous).
+				a.isStreamDepot = false
+				a.browserPane.SetRoot("//")
+				cmds = append(cmds, a.cmdBrowserLoad("//", a.browserPane.Mode()))
+				if a.historyMode {
+					cmds = append(cmds, a.cmdFilelogMax("//...", 100))
+				}
+			}
+			if len(cmds) > 0 {
+				return a, tea.Batch(cmds...)
+			}
+		}
+		return a, nil
+
+	case streamsFetchedMsg:
+		if m.err == nil && len(m.streams) > 1 {
+			a.streams = m.streams
+			a.showStreams = true
+			a.streamsPane.SetStreams(m.streams, a.statusPane.CurrentStream())
+			a.relayout()
 		}
 		return a, nil
 
 	case fetchDoneMsg:
 		if m.err != nil {
-			a.status = "fetch error: " + m.err.Error()
-			a.statusPane.SetPending(0)
+			if p4.IsConnectionError(m.err) {
+				a.setOffline(true)
+			} else {
+				a.status = "fetch error: " + m.err.Error()
+				a.statusPane.SetPending(0)
+			}
 			a.cmdLog.Add("p4 sync -n", "error: "+m.err.Error())
 		} else {
+			a.setOffline(false)
 			a.statusPane.SetPending(m.count)
 			a.status = fmt.Sprintf("Fetch: %d file(s) pending", m.count)
 			a.cmdLog.Add("p4 sync -n", fmt.Sprintf("↓%d pending", m.count))
 		}
 		return a, nil
+
+	case panes.BrowserNeedsLoadMsg:
+		return a, a.cmdBrowserLoad(m.Path, m.Mode)
+
+	case browserLoadedMsg:
+		a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files)
+		a.relayout()
+		if a.browserNavTarget != "" {
+			if a.browserPane.NavigateTo(a.browserNavTarget) {
+				a.browserNavTarget = ""
+			} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
+				return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
+			} else {
+				a.browserNavTarget = ""
+			}
+		}
+		return a, nil
+
+	case panes.BrowserNeedsSearchMsg:
+		return a, a.cmdBrowserSearch(m.Root, m.Mode)
+
+	case browserSearchDoneMsg:
+		if m.err == nil {
+			a.browserPane.LoadSearchIndex(m.files)
+		}
+		return a, nil
+
+	case forceSyncDoneMsg:
+		if m.err != nil {
+			a.status = "force sync failed: " + m.err.Error()
+			a.cmdLog.Add("p4 sync -f "+m.path, "error: "+m.err.Error())
+		} else {
+			a.status = "Force sync complete: " + m.path
+			a.cmdLog.Add("p4 sync -f "+m.path, "done")
+		}
+		return a, a.refresh()
+
+	case reconcileDoneMsg:
+		if m.err != nil {
+			a.status = "reconcile failed: " + m.err.Error()
+			a.cmdLog.Add("p4 reconcile "+m.path, "error: "+m.err.Error())
+		} else {
+			a.status = "Reconcile complete: " + m.path
+			a.cmdLog.Add("p4 reconcile "+m.path, "done")
+		}
+		return a, a.refresh()
+
+	case panes.BrowserOpenFileMsg:
+		return a, a.cmdOpenFile(m.DepotPath)
+
+	case openFileDoneMsg:
+		if m.err != nil {
+			a.status = "open failed: " + m.err.Error()
+		}
+		return a, nil
+
+	case syncToCLDoneMsg:
+		if m.err != nil {
+			a.status = "checkout failed: " + m.err.Error()
+			a.cmdLog.Add("p4 sync @"+m.cl, "error: "+m.err.Error())
+		} else {
+			a.status = fmt.Sprintf("Workspace synced to CL %s", m.cl)
+			a.cmdLog.Add("p4 sync @"+m.cl, "done")
+		}
+		return a, tea.Batch(a.refresh(), a.cmdFetch())
+
+	case streamSwitchedMsg:
+		a.streamSwitch = nil
+		if m.err != nil {
+			a.status = "stream switch failed: " + m.err.Error()
+			a.cmdLog.Add("p4 switch", "error: "+m.err.Error())
+		} else {
+			a.status = "Stream switched to " + m.stream
+			a.cmdLog.Add("p4 switch "+m.stream, "done")
+			return a, tea.Batch(a.cmdInfo(), a.refresh(), a.cmdFetch(), a.cmdLoadShelved())
+		}
+		return a, nil
+
+	case moveDoneMsg:
+		if m.err != nil {
+			a.status = "move failed: " + m.err.Error()
+			a.cmdLog.Add("p4 reopen", "error: "+m.err.Error())
+		} else {
+			dest := m.clID
+			if dest == "default" {
+				dest = "default CL"
+			}
+			a.status = fmt.Sprintf("Moved %d file(s) to %s", m.count, dest)
+			a.cmdLog.Add("p4 reopen -c "+m.clID, fmt.Sprintf("%d files", m.count))
+			a.fileList.ClearMarks()
+		}
+		return a, a.refresh()
 
 	case tea.MouseMsg:
 		if a.showHelp {
@@ -359,8 +780,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-		if a.active == paneCmdLog {
-			cmd := a.cmdLog.Update(m)
+		if m.Button == tea.MouseButtonWheelUp || m.Button == tea.MouseButtonWheelDown {
+			var cmd tea.Cmd
+			switch a.active {
+			case paneBrowser:
+				cmd = a.browserPane.Update(m)
+			case paneFileList:
+				cmd = a.fileList.Update(m)
+			case paneShelved:
+				cmd = a.shelvedPane.Update(m)
+			case paneLog:
+				cmd = a.log.Update(m)
+			case paneDiff:
+				cmd = a.diff.Update(m)
+			case paneCmdLog:
+				cmd = a.cmdLog.Update(m)
+			}
 			return a, cmd
 		}
 		if m.Action == tea.MouseActionPress && m.Button == tea.MouseButtonLeft {
@@ -375,9 +810,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any key exits select mode and re-enables mouse.
+	if a.selectMode {
+		a.selectMode = false
+		return a, tea.EnableMouseCellMotion
+	}
+
 	if m.String() == "?" {
 		a.showHelp = !a.showHelp
 		if a.showHelp {
+			a.helpViewport.SetContent(a.helpContent())
 			a.helpViewport.GotoTop()
 		}
 		return a, nil
@@ -394,7 +836,61 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// When the active pane is in filter mode, route all keys to the pane so
+	// global shortcuts (s, d, b, …) don't fire while typing a search term.
+	// Esc is intercepted here so async nav loading can be triggered.
+	if a.activePaneInFilterMode() {
+		if m.String() == "esc" {
+			return a.handleFilterClear(m)
+		}
+		var cmd tea.Cmd
+		switch a.active {
+		case paneBrowser:
+			cmd = a.browserPane.Update(m)
+		case paneFileList:
+			cmd = a.fileList.Update(m)
+		}
+		return a, cmd
+	}
+
+	// Esc with an active (but non-typing) filter clears it and stays in the pane.
+	if m.String() == "esc" {
+		switch a.active {
+		case paneBrowser:
+			if a.browserPane.HasFilter() {
+				return a.handleFilterClear(m)
+			}
+		case paneFileList:
+			if a.fileList.HasFilter() {
+				return a.handleFilterClear(m)
+			}
+		}
+	}
+
+	// Resolve pane captures its own keys before any global handler.
+	if a.active == paneResolve {
+		if m.String() == "esc" {
+			a.active = paneFileList
+			a.updateFocus()
+			return a, nil
+		}
+		cmd := a.resolve.Update(m)
+		return a, cmd
+	}
+
+	// Block server-dependent operations when offline.
+	if a.offlineMode {
+		switch m.String() {
+		case "S", "s", "e", "E", "d", "u", "o", "F", "f", "m", "R":
+			a.status = "Offline — p4 server unreachable"
+			return a, nil
+		}
+	}
+
 	switch m.String() {
+	case "v":
+		a.selectMode = true
+		return a, tea.DisableMouse
 	case "q", "ctrl+c":
 		return a, tea.Quit
 	case "r":
@@ -407,7 +903,57 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.statusPane.SetFetching()
 		a.status = "Fetching..."
 		return a, a.cmdFetch()
+	case "b":
+		a.browserPane.ToggleMode()
+		if path := a.browserPane.RootPath(); path != "" {
+			return a, tea.Batch(
+				a.cmdBrowserLoad(path, a.browserPane.Mode()),
+				a.cmdBrowserSearch(path, a.browserPane.Mode()),
+			)
+		}
+		return a, nil
+	case "F":
+		path := ""
+		switch a.active {
+		case paneBrowser:
+			path = a.browserPane.SelectedPath()
+		case paneFileList:
+			if a.fileList.IsOnCLHeader() {
+				a.status = "Force sync applies to files and folders - navigate to a file or folder"
+				return a, nil
+			}
+			if f := a.fileList.SelectedFile(); f != nil {
+				path = f.DepotFile
+			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
+				path = dp
+			}
+		}
+		if path == "" {
+			a.status = "No file or folder selected for force sync"
+			return a, nil
+		}
+		a.status = "Force syncing " + path + "..."
+		return a, a.cmdForceSync(path)
+	case "u":
+		if a.active == paneShelved {
+			clID := a.shelvedPane.SelectedCL()
+			if clID == "" {
+				a.status = "No shelved CL selected"
+				return a, nil
+			}
+			return a, a.cmdUnshelveAndDelete(clID)
+		}
+		return a, nil
 	case "d":
+		if a.active == paneShelved {
+			clID := a.shelvedPane.SelectedCL()
+			if clID == "" {
+				a.status = "No shelved CL selected"
+				return a, nil
+			}
+			a.confirm = &confirmModal{kind: confirmKindDeleteShelf, clID: clID}
+			return a, nil
+		}
 		if a.opRunning {
 			a.status = a.opName + " in progress"
 			return a, nil
@@ -418,14 +964,26 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for i, f := range marked {
 				files[i] = f.ClientFile
 			}
-			a.confirm = &confirmModal{files: files}
+			a.confirm = &confirmModal{kind: confirmKindRevert, files: files}
 		} else {
 			f := a.fileList.SelectedFile()
-			if f == nil {
+			if f != nil {
+				a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}}
+			} else if clID := a.fileList.SelectedCL(); clID != "" {
+				cls := a.fileList.FilesForCL(clID)
+				if len(cls) == 0 {
+					a.status = "No files in CL " + clID
+					return a, nil
+				}
+				files := make([]string, len(cls))
+				for i, ff := range cls {
+					files[i] = ff.ClientFile
+				}
+				a.confirm = &confirmModal{kind: confirmKindRevert, files: files}
+			} else {
 				a.status = "No file selected"
 				return a, nil
 			}
-			a.confirm = &confirmModal{files: []string{f.ClientFile}}
 		}
 		return a, nil
 	case "S":
@@ -460,68 +1018,274 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "h", "left":
 		a.cycleFocusBackward()
 		return a, nil
+	case "g":
+		a.historyMode = !a.historyMode
+		if a.historyMode {
+			// load filelog for currently selected file/dir, or stream root
+			if f := a.fileList.SelectedFile(); f != nil {
+				return a, a.cmdFilelog(f.DepotFile)
+			}
+			if dp := a.fileList.SelectedDepotPath(); dp != "" {
+				return a, a.cmdFilelogMax(dp, 100)
+			}
+			if path := a.browserPane.SelectedPath(); path != "" {
+				max := 0
+				if strings.HasSuffix(path, "/...") {
+					max = 100
+				}
+				return a, a.cmdFilelogMax(path, max)
+			}
+			if root := a.browserPane.RootPath(); root != "" {
+				return a, a.cmdFilelogMax(depotWildcard(root), 100)
+			}
+		} else if a.active == paneLog {
+			a.active = paneDiff
+			a.updateFocus()
+		}
+		return a, nil
 	case "l", "right":
 		a.cycleFocusForward()
 		return a, nil
-	case "L":
-		f := a.fileList.SelectedFile()
-		if f == nil {
-			a.status = "No file selected"
-			return a, nil
-		}
-		a.status = "Loading filelog..."
-		return a, a.cmdFilelog(f.DepotFile)
 	case "R":
 		a.status = "Checking conflicts..."
-		return a, a.cmdResolveList()
+		var resolvePath string
+		if f := a.fileList.SelectedFile(); f != nil {
+			resolvePath = f.ClientFile
+		} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
+			resolvePath = dp + "/..."
+		}
+		return a, a.cmdResolveList(resolvePath)
+	case "e", "E":
+		if a.active == paneFileList {
+			noRevert := m.String() == "E"
+			if files := a.filesToShelve(); len(files) > 0 {
+				ti := textinput.New()
+				ti.Placeholder = "Changelist description..."
+				ti.Width = 50
+				ti.Focus()
+				a.shelveModal = &shelveDescModal{input: ti, files: files, noRevert: noRevert}
+				return a, textinput.Blink
+			}
+			return a, nil
+		}
+		return a, nil
+	case "o":
+		path := ""
+		if a.active == paneBrowser {
+			path = a.browserPane.SelectedPath()
+		}
+		if path == "" {
+			if root := a.browserPane.RootPath(); root != "" {
+				path = root + "/..."
+			}
+		}
+		if path == "" {
+			a.status = "No path available for reconcile"
+			return a, nil
+		}
+		a.status = "Reconciling " + path + "..."
+		return a, a.cmdReconcile(path)
 	case "m":
-		a.status = "Move: not yet implemented"
+		if a.active == paneFileList {
+			files := a.filesToMove()
+			if len(files) == 0 {
+				a.status = "No file selected"
+				return a, nil
+			}
+			ti := textinput.New()
+			ti.Placeholder = "CL name (empty = default)..."
+			ti.Width = 40
+			ti.Focus()
+			a.moveModal = &moveCLModal{input: ti, files: files}
+			return a, textinput.Blink
+		}
 		return a, nil
-	case "1":
-		a.active = paneFileList
-		a.updateFocus()
-		return a, nil
-	case "2":
-		a.active = paneMiniLog
-		a.updateFocus()
-		return a, nil
-	case "3":
-		a.active = a.currentRightPane()
-		a.updateFocus()
-		return a, nil
-	case "4":
-		a.active = paneCmdLog
-		a.updateFocus()
+	case "1", "2", "3", "4", "5", "6":
+		order := a.paneOrder()
+		n := int(m.String()[0]-'0') - 1
+		if n >= 0 && n < len(order) {
+			a.active = order[n]
+			a.updateFocus()
+		}
 		return a, nil
 	case "tab":
 		a.cycleFocus()
 		return a, nil
 	case "esc":
-		a.active = paneFileList
+		a.active = paneBrowser
 		a.updateFocus()
 		return a, nil
 	}
 
 	var cmd tea.Cmd
 	switch a.active {
-	case paneFileList:
-		cmd = a.fileList.Update(m)
-		f := a.fileList.SelectedFile()
-		if f != nil {
-			return a, tea.Batch(cmd, a.cmdDiff(f.ClientFile), a.cmdMiniLog(f.DepotFile))
+	case paneBrowser:
+		cmd = a.browserPane.Update(m)
+		if a.historyMode {
+			if path := a.browserPane.SelectedPath(); path != "" {
+				max := 0
+				if strings.HasSuffix(path, "/...") {
+					max = 100
+				}
+				return a, tea.Batch(cmd, a.cmdFilelogMax(path, max))
+			}
 		}
+	case paneFileList:
+		if m.String() == "enter" {
+			if f := a.fileList.SelectedFile(); f != nil {
+				return a, func() tea.Msg {
+					return openFileDoneMsg{err: openWithDefault(f.ClientFile)}
+				}
+			}
+		}
+		cmd = a.fileList.Update(m)
+		if a.historyMode {
+			var histCmd tea.Cmd
+			if f := a.fileList.SelectedFile(); f != nil {
+				histCmd = a.cmdFilelog(f.DepotFile)
+			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
+				histCmd = a.cmdFilelogMax(dp, 100)
+			}
+			if histCmd != nil {
+				if f := a.fileList.SelectedFile(); f != nil {
+					return a, tea.Batch(cmd, a.cmdDiff(f.ClientFile), histCmd)
+				}
+				return a, tea.Batch(cmd, histCmd)
+			}
+		}
+		if f := a.fileList.SelectedFile(); f != nil {
+			return a, tea.Batch(cmd, a.cmdDiff(f.ClientFile))
+		}
+	case paneStreams:
+		cmd = a.streamsPane.Update(m)
+		if m.String() == "enter" {
+			stream := a.streamsPane.SelectedStream()
+			if stream != "" {
+				sw := &streamSwitchModal{stream: stream, switching: true}
+				a.streamSwitch = sw
+				return a, tea.Batch(cmd, a.cmdSwitchToStream(stream))
+			}
+		}
+	case paneShelved:
+		cmd = a.shelvedPane.Update(m)
 	case paneDiff:
 		cmd = a.diff.Update(m)
 	case paneLog:
+		if a.historyMode && (m.String() == "space" || m.String() == "enter") {
+			cl := a.log.SelectedChange()
+			if cl != "" {
+				stream := ""
+				if a.isStreamDepot {
+					stream = a.browserPane.RootPath()
+				}
+				openFiles := a.fileList.HasFiles()
+				a.checkout = &checkoutModal{cl: cl, stream: stream, hasFiles: openFiles}
+				return a, nil
+			}
+		}
 		cmd = a.log.Update(m)
 	case paneResolve:
 		cmd = a.resolve.Update(m)
-	case paneMiniLog:
-		cmd = a.miniLog.Update(m)
 	case paneCmdLog:
 		cmd = a.cmdLog.Update(m)
 	}
 	return a, cmd
+}
+
+func (a *App) handleFilterClear(_ tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch a.active {
+	case paneBrowser:
+		if navTarget := a.browserPane.ClearFilter(); navTarget != "" {
+			a.browserNavTarget = navTarget
+			if next := a.browserPane.FirstUnloadedAncestor(navTarget); next != "" {
+				return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
+			}
+		}
+	case paneFileList:
+		a.fileList.ClearFilter()
+	}
+	return a, nil
+}
+
+func (a *App) handleStreamSwitchKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// While p4 switch is running, ignore all keys.
+	return a, nil
+}
+
+func (a *App) setOffline(offline bool) {
+	a.offlineMode = offline
+	a.statusPane.SetOffline(offline)
+	if offline {
+		a.status = "Offline — p4 server unreachable"
+	}
+}
+
+func (a *App) activePaneInFilterMode() bool {
+	switch a.active {
+	case paneBrowser:
+		return a.browserPane.InFilterMode()
+	case paneFileList:
+		return a.fileList.InFilterMode()
+	}
+	return false
+}
+
+// filesToShelve returns the current selection as a flat file list for the shelve modal.
+func (a *App) filesToShelve() []p4.OpenedFile {
+	if marked := a.fileList.MarkedFiles(); len(marked) > 0 {
+		return marked
+	}
+	if f := a.fileList.SelectedFile(); f != nil {
+		return []p4.OpenedFile{*f}
+	}
+	if clID := a.fileList.SelectedCL(); clID != "" {
+		return a.fileList.FilesForCL(clID)
+	}
+	return nil
+}
+
+func (a *App) execShelveWithDesc() tea.Cmd {
+	m := a.shelveModal
+	a.shelveModal = nil
+	desc := strings.TrimSpace(m.input.Value())
+	if desc == "" {
+		desc = "Shelved changes"
+	}
+	files := m.files
+	noRevert := m.noRevert
+	return func() tea.Msg {
+		clID, err := a.client.CreateChange(desc)
+		if err != nil {
+			return shelveDoneMsg{err: err}
+		}
+		for _, f := range files {
+			if _, err := a.client.Reopen(clID, f.ClientFile); err != nil {
+				return shelveDoneMsg{err: err}
+			}
+		}
+		if _, err := a.client.Shelve(clID); err != nil {
+			return shelveDoneMsg{err: err}
+		}
+		if !noRevert {
+			clientFiles := make([]string, len(files))
+			for i, f := range files {
+				clientFiles[i] = f.ClientFile
+			}
+			if _, err := a.client.RevertFiles(clientFiles); err != nil {
+				return shelveDoneMsg{err: err}
+			}
+		}
+		return shelveDoneMsg{count: len(files)}
+	}
+}
+
+func (a *App) renderShelveModal() string {
+	content := styleModalTitle.Render(fmt.Sprintf("Shelve %d file(s)", len(a.shelveModal.files))) +
+		"\n\n" +
+		a.shelveModal.input.View() +
+		"\n\n" +
+		styleModalHint.Render("enter - confirm   esc - cancel")
+	return styleModalBox.Render(content)
 }
 
 func (a *App) execSubmit() tea.Cmd {
@@ -541,64 +1305,107 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	leftW := a.width / 3
 	contentH := a.height - 1
 	bodyH := contentH - panes.CmdLogHeight
-	leftH := bodyH - panes.StatusHeight
-	fileListH := leftH * 7 / 10
-	if fileListH < 4 {
-		fileListH = 4
-	}
 
 	if y >= bodyH {
+		a.active = paneCmdLog
+		a.updateFocus()
 		return a, nil
 	}
 
 	if x < leftW {
-		fileListTop := panes.StatusHeight
-		fileListBottom := fileListTop + fileListH
-		if y >= fileListTop && y < fileListBottom {
+		streamsH := 0
+		if a.showStreams {
+			streamsH = len(a.streams) + 2
+			if streamsH > 10 {
+				streamsH = 10
+			}
+		}
+		shelvedH := a.shelvedPane.PreferredHeight()
+		browserH := (bodyH - panes.StatusHeight) - streamsH - shelvedH
+		if browserH < 3 {
+			browserH = 3
+		}
+
+		browserTop := panes.StatusHeight
+		browserBottom := browserTop + browserH
+		streamsTop := browserBottom
+		streamsBottom := streamsTop + streamsH
+		shelvedTop := streamsBottom
+
+		switch {
+		case y >= browserTop && y < browserBottom:
+			a.active = paneBrowser
+			a.updateFocus()
+			if contentY := y - browserTop - 1; contentY >= 0 {
+				a.browserPane.SetCursor(a.browserPane.ScrollOffset() + contentY)
+			}
+		case a.showStreams && y >= streamsTop && y < streamsBottom:
+			a.active = paneStreams
+			a.updateFocus()
+		case y >= shelvedTop:
+			a.active = paneShelved
+			a.updateFocus()
+		}
+	} else {
+		// right side: top = pending, bottom = diff/log/resolve
+		pendingH := bodyH * 2 / 5
+		if pendingH < 4 {
+			pendingH = 4
+		}
+
+		if y < pendingH {
 			a.active = paneFileList
 			a.updateFocus()
-			contentY := y - fileListTop - 1 // -1 for top border
+			contentY := y - 1
 			if contentY >= 0 {
 				rowIdx := a.fileList.ScrollOffset() + contentY
 				a.fileList.SetCursor(rowIdx)
 				if f := a.fileList.SelectedFile(); f != nil {
-					return a, tea.Batch(a.cmdDiff(f.ClientFile), a.cmdMiniLog(f.DepotFile))
+					return a, a.cmdDiff(f.ClientFile)
 				}
 			}
+		} else {
+			a.active = a.currentRightPane()
+			a.updateFocus()
 		}
-	} else {
-		a.active = a.currentRightPane()
-		a.updateFocus()
 	}
 
 	return a, nil
 }
 
 func (a *App) currentRightPane() activePane {
-	switch a.active {
-	case paneLog, paneResolve:
-		return a.active
-	default:
-		return paneDiff
+	if a.active == paneResolve {
+		return paneResolve
 	}
+	if a.historyMode {
+		return paneLog
+	}
+	if a.active == paneLog {
+		return paneLog
+	}
+	return paneDiff
 }
 
 func (a *App) cycleFocus() {
-	switch a.active {
-	case paneFileList:
-		a.active = a.currentRightPane()
-	case paneDiff, paneLog, paneResolve:
-		a.active = paneMiniLog
-	case paneMiniLog:
-		a.active = paneCmdLog
-	default:
-		a.active = paneFileList
+	order := a.paneOrder()
+	for i, p := range order {
+		if p == a.active {
+			a.active = order[(i+1)%len(order)]
+			a.updateFocus()
+			return
+		}
 	}
+	a.active = order[0]
 	a.updateFocus()
 }
 
 func (a *App) paneOrder() []activePane {
-	return []activePane{paneFileList, paneMiniLog, a.currentRightPane(), paneCmdLog}
+	order := []activePane{paneBrowser, paneFileList}
+	if a.showStreams {
+		order = append(order, paneStreams)
+	}
+	order = append(order, paneShelved, a.currentRightPane(), paneCmdLog)
+	return order
 }
 
 func (a *App) cycleFocusForward() {
@@ -628,11 +1435,13 @@ func (a *App) cycleFocusBackward() {
 }
 
 func (a *App) updateFocus() {
+	a.browserPane.SetFocused(a.active == paneBrowser)
 	a.fileList.SetFocused(a.active == paneFileList)
+	a.streamsPane.SetFocused(a.active == paneStreams)
+	a.shelvedPane.SetFocused(a.active == paneShelved)
 	a.diff.SetFocused(a.active == paneDiff)
 	a.log.SetFocused(a.active == paneLog)
 	a.resolve.SetFocused(a.active == paneResolve)
-	a.miniLog.SetFocused(a.active == paneMiniLog)
 	a.cmdLog.SetFocused(a.active == paneCmdLog)
 }
 
@@ -649,20 +1458,38 @@ func (a *App) relayout() {
 	a.statusPane.SetWidth(leftW)
 	leftH := bodyH - panes.StatusHeight
 
-	fileListH := leftH * 7 / 10
-	if fileListH < 4 {
-		fileListH = 4
+	streamsH := 0
+	if a.showStreams {
+		streamsH = len(a.streams) + 2
+		if streamsH > 10 {
+			streamsH = 10
+		}
+		a.streamsPane.SetSize(leftW, streamsH)
 	}
-	miniLogH := leftH - fileListH
 
-	a.fileList.SetSize(leftW, fileListH)
-	a.miniLog.SetSize(leftW, miniLogH)
-	a.diff.SetSize(rightW, bodyH)
-	a.log.SetSize(rightW, bodyH)
-	a.resolve.SetSize(rightW, bodyH)
+	shelvedH := a.shelvedPane.PreferredHeight()
+	a.shelvedPane.SetSize(leftW, shelvedH)
+
+	browserH := leftH - streamsH - shelvedH
+	if browserH < 3 {
+		browserH = 3
+	}
+	a.browserPane.SetSize(leftW, browserH)
+
+	// Right column: pending (top) + diff (bottom)
+	pendingH := bodyH * 2 / 5
+	if pendingH < 4 {
+		pendingH = 4
+	}
+	diffH := bodyH - pendingH
+
+	a.fileList.SetSize(rightW, pendingH)
+	a.diff.SetSize(rightW, diffH)
+	a.log.SetSize(rightW, diffH)
+	a.resolve.SetSize(rightW, diffH)
 	a.cmdLog.SetWidth(a.width)
 
-	helpW := a.width*3/5 - 2 // inner width (subtract border chars)
+	helpW := a.width*3/5 - 2
 	helpH := a.height*3/5 - 2
 	if helpW < 20 {
 		helpW = 20
@@ -680,27 +1507,41 @@ func (a *App) View() string {
 		return "Loading..."
 	}
 
-	leftSide := lipgloss.JoinVertical(lipgloss.Left,
-		a.statusPane.View(),
-		a.fileList.View(),
-		a.miniLog.View(),
-	)
-
-	var rightPane string
-	switch a.active {
-	case paneLog:
-		rightPane = a.log.View()
-	case paneResolve:
-		rightPane = a.resolve.View()
-	default:
-		rightPane = a.diff.View()
+	leftParts := []string{a.statusPane.View(), a.browserPane.View()}
+	if a.showStreams {
+		leftParts = append(leftParts, a.streamsPane.View())
 	}
+	leftParts = append(leftParts, a.shelvedPane.View())
+	leftSide := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, leftSide, rightPane)
+	var rightBottom string
+	switch a.currentRightPane() {
+	case paneLog:
+		rightBottom = a.log.View()
+	case paneResolve:
+		rightBottom = a.resolve.View()
+	default:
+		rightBottom = a.diff.View()
+	}
+	rightSide := lipgloss.JoinVertical(lipgloss.Left, a.fileList.View(), rightBottom)
+
+	body := lipgloss.JoinHorizontal(lipgloss.Top, leftSide, rightSide)
 	base := lipgloss.JoinVertical(lipgloss.Left, body, a.cmdLog.View(), a.renderHotkeys())
 
+	if a.streamSwitch != nil {
+		return overlayCenter(a.renderStreamSwitchModal(), base, a.width, a.height)
+	}
+	if a.checkout != nil {
+		return overlayCenter(a.renderCheckoutModal(), base, a.width, a.height)
+	}
 	if a.confirm != nil {
 		return overlayCenter(a.renderConfirmModal(), base, a.width, a.height)
+	}
+	if a.shelveModal != nil {
+		return overlayCenter(a.renderShelveModal(), base, a.width, a.height)
+	}
+	if a.moveModal != nil {
+		return overlayCenter(a.renderMoveModal(), base, a.width, a.height)
 	}
 	if a.modal != nil {
 		return overlayCenter(a.renderModal(), base, a.width, a.height)
@@ -734,6 +1575,7 @@ var (
 
 	styleModalHint = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
+
 )
 
 func (a *App) renderProgressBar() string {
@@ -767,28 +1609,75 @@ func (a *App) renderProgressBar() string {
 }
 
 func (a *App) renderHotkeys() string {
+	if a.selectMode {
+		hint := styleHotkeyKey.Render("Select mode") +
+			styleHotkeys.Render(" - select text in terminal, then press any key to restore mouse")
+		return " " + hint
+	}
 	if a.opRunning {
 		return a.renderProgressBar()
 	}
 
 	type binding struct{ desc, key string }
 
-	var bindings []binding
-	if a.fileList.HasFiles() {
-		bindings = append(bindings, binding{"Add", "space"})
+	// Local bindings — most common actions for the active pane.
+	var local []binding
+	switch a.active {
+	case paneBrowser:
+		local = []binding{
+			{"Expand", "enter"},
+			{"Browser mode", "b"},
+		}
+	case paneFileList:
+		if a.fileList.HasFiles() {
+			local = append(local, binding{"Mark", "space"})
+		}
+		local = append(local,
+			binding{"Submit", "s"},
+			binding{"Shelve", "e"},
+			binding{"Move CL", "m"},
+			binding{"Discard", "d"},
+			binding{"Conflicts", "R"},
+		)
+	case paneShelved:
+		local = []binding{
+			{"Unshelve", "u"},
+			{"Delete shelf", "d"},
+		}
+	case paneStreams:
+		local = []binding{{"Switch stream", "enter"}}
+	case paneResolve:
+		local = []binding{
+			{"Merge", "enter"},
+			{"Accept theirs", "a"},
+			{"Accept yours", "y"},
+			{"Safe auto", "s"},
+			{"Close", "esc"},
+		}
+	case paneLog:
+		if a.historyMode {
+			local = []binding{{"Checkout", "space"}}
+		}
 	}
-	bindings = append(bindings,
-		binding{"Submit", "s"},
-		binding{"Discard", "d"},
-		binding{"Fetch", "f"},
-		binding{"Sync", "S"},
-	)
+
+	// Global bindings — always shown.
+	global := []binding{
+		{"History", "g"},
+		{"Fetch", "f"},
+		{"Sync", "S"},
+		{"Refresh", "r"},
+		{"?", "help"},
+	}
+
+	shown := local
+	if len(local) < 5 {
+		shown = append(shown, global...)
+	}
 
 	var parts []string
-	for _, b := range bindings {
+	for _, b := range shown {
 		parts = append(parts, styleHotkeys.Render(b.desc+": ")+styleHotkeyKey.Render(b.key))
 	}
-	parts = append(parts, styleHotkeys.Render("Keybindings: ")+styleHotkeyKey.Render("?"))
 	hotkeys := " " + strings.Join(parts, styleHotkeys.Render(" | "))
 
 	hotkeysW := lipgloss.Width(hotkeys)
@@ -820,22 +1709,57 @@ func (a *App) renderModal() string {
 	return styleModalBox.Render(content)
 }
 
-func (a *App) renderConfirmModal() string {
-	var desc string
-	if len(a.confirm.files) == 1 {
-		name := a.confirm.files[0]
-		if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
-			name = name[idx+1:]
-		}
-		desc = styleStatus.Render(name)
+func (a *App) renderCheckoutModal() string {
+	co := a.checkout
+	var content string
+	if co.hasFiles && !co.shelving {
+		content = styleModalTitle.Render(fmt.Sprintf("Sync to CL %s", co.cl)) +
+			"\n\n" +
+			styleStatus.Render("You have open files in your workspace.") +
+			"\n\n" +
+			styleModalHint.Render("y / enter - shelve open files then sync\ns         - sync without shelving\nesc / n   - cancel")
 	} else {
-		desc = styleStatus.Render(fmt.Sprintf("%d files", len(a.confirm.files)))
+		content = styleModalTitle.Render(fmt.Sprintf("Sync workspace to CL %s?", co.cl)) +
+			"\n\n" +
+			styleModalHint.Render("enter - confirm   esc - cancel")
 	}
-	content := styleModalTitle.Render("Discard changes?") +
+	return styleModalBox.Render(content)
+}
+
+func (a *App) renderStreamSwitchModal() string {
+	sw := a.streamSwitch
+	streamName := sw.stream
+	if idx := strings.LastIndex(streamName, "/"); idx >= 0 {
+		streamName = streamName[idx+1:]
+	}
+	title := styleModalTitle.Render("Switch to " + streamName)
+	body := styleModalHint.Render("Switching...")
+	return styleModalBox.Render(title + "\n\n" + body)
+}
+
+func (a *App) renderConfirmModal() string {
+	var title, desc string
+	switch a.confirm.kind {
+	case confirmKindDeleteShelf:
+		title = "Delete shelf?"
+		desc = styleStatus.Render(fmt.Sprintf("CL %s", a.confirm.clID))
+	default:
+		title = "Discard changes?"
+		if len(a.confirm.files) == 1 {
+			name := a.confirm.files[0]
+			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
+				name = name[idx+1:]
+			}
+			desc = styleStatus.Render(name)
+		} else {
+			desc = styleStatus.Render(fmt.Sprintf("%d files", len(a.confirm.files)))
+		}
+	}
+	content := styleModalTitle.Render(title) +
 		"\n\n" +
 		desc +
 		"\n\n" +
-		styleModalHint.Render("enter - revert   esc - cancel")
+		styleModalHint.Render("enter - confirm   esc - cancel")
 	return styleModalBox.Render(content)
 }
 
@@ -848,35 +1772,96 @@ func (a *App) renderHelpModal() string {
 	return panes.InjectTitle(rendered, "?", "Keybindings", totalW, true)
 }
 
-func helpContent() string {
+func (a *App) helpContent() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	key := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
-	type row struct{ k, desc string }
-	rows := []row{
-		{"j / k", "Navigate files"},
-		{"enter", "Expand / collapse directory"},
-		{"space", "Mark / unmark file for submit"},
-		{"s", "Submit (opens description form)"},
-		{"d", "Discard (revert) selected file"},
-		{"h / l", "Cycle panel focus left / right"},
-		{"tab", "Cycle panel focus (forward)"},
-		{"esc", "Back to file list"},
-		{"t", "Toggle tree / flat view"},
-		{"f", "Fetch (dry-run sync, shows pending count)"},
-		{"S", "Sync"},
-		{"c", "Cancel operation (sync / submit)"},
-		{"r", "Refresh"},
-		{"L", "File log for selected file"},
-		{"R", "Show conflicts"},
-		{"q", "Quit"},
-		{"?", "Close this window"},
+	type row struct {
+		k, desc string
+		section bool
 	}
+
+	var local []row
+	switch a.active {
+	case paneBrowser:
+		local = []row{
+			{k: "enter", desc: "Expand / collapse directory"},
+			{k: "b", desc: "Toggle Workspace / Depot Browser"},
+			{k: "t", desc: "Toggle tree / flat view"},
+			{k: "/", desc: "Filter / search"},
+			{k: "F", desc: "Force sync selected file or folder"},
+			{k: "o", desc: "Reconcile offline work"},
+		}
+	case paneFileList:
+		local = []row{
+			{k: "space", desc: "Mark / unmark file for submit"},
+			{k: "enter", desc: "Open file"},
+			{k: "s", desc: "Submit (opens description form)"},
+			{k: "e", desc: "Shelve (reverts after)"},
+			{k: "E", desc: "Shelve without reverting"},
+			{k: "m", desc: "Move file(s) to a different CL"},
+			{k: "d", desc: "Discard (revert)"},
+			{k: "R", desc: "Show conflicts"},
+			{k: "t", desc: "Toggle tree / flat view"},
+			{k: "/", desc: "Filter / search"},
+		}
+	case paneStreams:
+		local = []row{
+			{k: "enter", desc: "Switch workspace to selected stream"},
+		}
+	case paneShelved:
+		local = []row{
+			{k: "u", desc: "Unshelve + delete shelf"},
+			{k: "d", desc: "Delete shelf"},
+		}
+	case paneResolve:
+		local = []row{
+			{k: "enter", desc: "Open merge tool for selected file"},
+			{k: "a", desc: "Accept theirs (or branch)"},
+			{k: "y", desc: "Accept yours"},
+			{k: "s", desc: "Safe auto-resolve"},
+			{k: "esc", desc: "Close conflicts pane"},
+		}
+	case paneLog:
+		local = []row{
+			{k: "space / enter", desc: "Checkout workspace to selected CL"},
+		}
+	}
+
+	global := []row{
+		{k: "j / k", desc: "Navigate"},
+		{k: "g", desc: "Toggle History / Diff pane"},
+		{k: "h / l", desc: "Cycle panel focus left / right"},
+		{k: "tab", desc: "Cycle panel focus (forward)"},
+		{k: "esc", desc: "Back to browser"},
+		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
+		{k: "S", desc: "Sync workspace"},
+		{k: "r", desc: "Refresh"},
+		{k: "c", desc: "Cancel operation (sync / submit)"},
+		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
+		{k: "q", desc: "Quit"},
+		{k: "?", desc: "Close this window"},
+	}
+
+	var rows []row
+	if len(local) > 0 {
+		rows = append(rows, row{k: "Local", section: true})
+		rows = append(rows, local...)
+	}
+	rows = append(rows, row{k: "Global", section: true})
+	rows = append(rows, global...)
 
 	var sb strings.Builder
 	for i, r := range rows {
-		line := fmt.Sprintf("  %s  %s", key.Render(fmt.Sprintf("%-14s", r.k)), dim.Render(r.desc))
-		sb.WriteString(line)
+		if r.section {
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(hdr.Render(fmt.Sprintf("  ── %s ──", r.k)))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s  %s", key.Render(fmt.Sprintf("%-14s", r.k)), dim.Render(r.desc)))
+		}
 		if i < len(rows)-1 {
 			sb.WriteByte('\n')
 		}
@@ -893,6 +1878,35 @@ func (a *App) cmdInfo() tea.Cmd {
 	}
 }
 
+func (a *App) cmdLoadShelved() tea.Cmd {
+	return func() tea.Msg {
+		cls, err := a.client.ShelvedCLs()
+		return shelvedDoneMsg{cls: cls, err: err}
+	}
+}
+
+func (a *App) cmdUnshelveAndDelete(clID string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.client.UnshelveAndDelete(clID)
+		return unshelveDeleteDoneMsg{clID: clID, err: err}
+	}
+}
+
+func (a *App) cmdDeleteShelf(clID string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.client.DeleteShelf(clID)
+		return deleteShelfDoneMsg{clID: clID, err: err}
+	}
+}
+
+func (a *App) cmdStreams(streamPath string) tea.Cmd {
+	return func() tea.Msg {
+		depotPath := p4.DepotFromStream(streamPath)
+		streams, err := a.client.Streams(depotPath)
+		return streamsFetchedMsg{streams: streams, err: err}
+	}
+}
+
 func (a *App) cmdFetch() tea.Cmd {
 	return func() tea.Msg {
 		count, err := a.client.SyncDryRun()
@@ -906,7 +1920,42 @@ func (a *App) refresh() tea.Cmd {
 		if err != nil {
 			return refreshDoneMsg{err: err}
 		}
+		// Mark files that need resolve.
+		if conflicts, err := a.client.ResolveList(""); err == nil && len(conflicts) > 0 {
+			// Conflict paths may be local (/tmp/root/rel) or depot (//depot/rel).
+			// Opened file ClientFile is //clientname/rel.
+			// Normalise both to their relative suffix for comparison.
+			relPath := func(p string) string {
+				if a.client.Root != "" {
+					if rel := strings.TrimPrefix(p, a.client.Root+"/"); rel != p {
+						return rel
+					}
+				}
+				if strings.HasPrefix(p, "//") {
+					if idx := strings.Index(p[2:], "/"); idx >= 0 {
+						return p[2+idx+1:]
+					}
+				}
+				return p
+			}
+			needsResolve := make(map[string]bool, len(conflicts))
+			for _, c := range conflicts {
+				needsResolve[relPath(c.ClientFile)] = true
+			}
+			for i := range files {
+				if needsResolve[relPath(files[i].ClientFile)] {
+					files[i].NeedsResolve = true
+				}
+			}
+		}
 		cls := p4.GroupByChangelist(files)
+		if descs, err := a.client.PendingDescriptions(); err == nil {
+			for i, cl := range cls {
+				if desc, ok := descs[cl.ID]; ok {
+					cls[i].Description = desc
+				}
+			}
+		}
 		return refreshDoneMsg{cls: cls}
 	}
 }
@@ -919,22 +1968,56 @@ func (a *App) cmdDiff(clientFile string) tea.Cmd {
 }
 
 func (a *App) cmdFilelog(depotFile string) tea.Cmd {
+	return a.cmdFilelogMax(depotFile, 0)
+}
+
+func (a *App) cmdFilelogMax(depotFile string, max int) tea.Cmd {
 	return func() tea.Msg {
-		entries, err := a.client.Filelog(depotFile, 0)
+		entries, err := a.client.Filelog(depotFile, max)
 		return logDoneMsg{entries: entries, err: err}
 	}
 }
 
-func (a *App) cmdMiniLog(depotFile string) tea.Cmd {
+// depotWildcard returns the recursive wildcard for a depot root path.
+// Handles the special case of "//" (server root) where appending "/..." would give "///...".
+func depotWildcard(root string) string {
+	if root == "//" {
+		return "//..."
+	}
+	return root + "/..."
+}
+
+func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 	return func() tea.Msg {
-		entries, err := a.client.Filelog(depotFile, 10)
-		return miniLogDoneMsg{entries: entries, err: err}
+		wildcard := depotWildcard(root)
+		var files []string
+		var err error
+		if mode == panes.BrowserModeWorkspace {
+			files, err = a.client.BrowserHaveFiles(wildcard)
+		} else {
+			files, err = a.client.BrowserDepotFiles(wildcard)
+		}
+		return browserSearchDoneMsg{files: files, err: err}
 	}
 }
 
-func (a *App) cmdResolveList() tea.Cmd {
+func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 	return func() tea.Msg {
-		conflicts, err := a.client.ResolveList()
+		wildcard := path + "/*"
+		dirs, _ := a.client.BrowserDirs(wildcard)
+		var files []string
+		if mode == panes.BrowserModeWorkspace {
+			files, _ = a.client.BrowserHaveFiles(wildcard)
+		} else {
+			files, _ = a.client.BrowserDepotFiles(wildcard)
+		}
+		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files}
+	}
+}
+
+func (a *App) cmdResolveList(path string) tea.Cmd {
+	return func() tea.Msg {
+		conflicts, err := a.client.ResolveList(path)
 		return conflictsDoneMsg{conflicts: conflicts, err: err}
 	}
 }
@@ -958,6 +2041,89 @@ func opErrLine(err error) string {
 		return "\x00" + err.Error()
 	}
 	return "\x00"
+}
+
+func (a *App) cmdOpenFile(depotPath string) tea.Cmd {
+	return func() tea.Msg {
+		local, err := a.client.WhereLocal(depotPath)
+		if err != nil {
+			return openFileDoneMsg{err: fmt.Errorf("p4 where: %w", err)}
+		}
+		if err := openWithDefault(local); err != nil {
+			return openFileDoneMsg{err: err}
+		}
+		return openFileDoneMsg{}
+	}
+}
+
+func (a *App) cmdReconcile(path string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := a.client.Reconcile(path)
+		return reconcileDoneMsg{path: path, err: err}
+	}
+}
+
+func (a *App) cmdForceSync(path string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := a.client.ForceSyncPath(path)
+		return forceSyncDoneMsg{path: path, err: err}
+	}
+}
+
+func (a *App) cmdSyncToCL(stream, cl string) tea.Cmd {
+	a.status = fmt.Sprintf("Syncing to CL %s...", cl)
+	return func() tea.Msg {
+		err := a.client.SyncToCL(stream, cl)
+		return syncToCLDoneMsg{cl: cl, err: err}
+	}
+}
+
+// shelveAndRevert shelves all files in a changelist and reverts them.
+// Shelve handles "default" with bare `p4 shelve`; revert uses explicit paths
+// so it works for both the default CL and numbered CLs.
+func (a *App) shelveAndRevert(cl p4.Changelist) error {
+	if len(cl.Files) == 0 {
+		return nil
+	}
+	if _, err := a.client.Shelve(cl.ID); err != nil {
+		return fmt.Errorf("shelve CL %s: %w", cl.ID, err)
+	}
+	clientFiles := make([]string, len(cl.Files))
+	for i, f := range cl.Files {
+		clientFiles[i] = f.ClientFile
+	}
+	if _, err := a.client.RevertFiles(clientFiles); err != nil {
+		return fmt.Errorf("revert CL %s: %w", cl.ID, err)
+	}
+	return nil
+}
+
+// cmdSwitchToStream runs p4 switch directly — fast, no workspace listing needed.
+func (a *App) cmdSwitchToStream(stream string) tea.Cmd {
+	a.status = "Switching to " + stream + "..."
+	return func() tea.Msg {
+		err := a.client.SwitchToStream(stream)
+		return streamSwitchedMsg{stream: stream, err: err}
+	}
+}
+
+
+// cmdShelveForCheckout shelves all open CLs, reverts all files, then syncs to the target CL.
+func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
+	a.checkout = nil
+	a.status = fmt.Sprintf("Shelving open files before sync to CL %s...", co.cl)
+	stream := co.stream
+	cl := co.cl
+	cls := a.fileList.Changelists()
+	return func() tea.Msg {
+		for _, c := range cls {
+			if err := a.shelveAndRevert(c); err != nil {
+				return syncToCLDoneMsg{cl: cl, err: err}
+			}
+		}
+		err := a.client.SyncToCL(stream, cl)
+		return syncToCLDoneMsg{cl: cl, err: err}
+	}
 }
 
 func (a *App) cmdSyncDryRun() tea.Cmd {
@@ -1011,6 +2177,65 @@ func (a *App) cmdShelve(clID string) tea.Cmd {
 	}
 }
 
+
+// filesToMove returns files to act on for the move-CL operation.
+func (a *App) filesToMove() []p4.OpenedFile {
+	if marked := a.fileList.MarkedFiles(); len(marked) > 0 {
+		return marked
+	}
+	if f := a.fileList.SelectedFile(); f != nil {
+		return []p4.OpenedFile{*f}
+	}
+	if clID := a.fileList.SelectedCL(); clID != "" {
+		return a.fileList.FilesForCL(clID)
+	}
+	return nil
+}
+
+func (a *App) execMoveToCL() tea.Cmd {
+	m := a.moveModal
+	a.moveModal = nil
+	name := strings.TrimSpace(m.input.Value())
+	files := m.files
+	clientFiles := make([]string, len(files))
+	for i, f := range files {
+		clientFiles[i] = f.ClientFile
+	}
+	return func() tea.Msg {
+		clID := "default"
+		if name != "" {
+			if isNumeric(name) {
+				clID = name
+			} else {
+				found, err := a.client.FindCLByDescription(name)
+				if err != nil {
+					return moveDoneMsg{err: err}
+				}
+				if found == "" {
+					found, err = a.client.CreateChange(name)
+					if err != nil {
+						return moveDoneMsg{err: err}
+					}
+				}
+				clID = found
+			}
+		}
+		if _, err := a.client.ReopenFiles(clID, clientFiles); err != nil {
+			return moveDoneMsg{err: err}
+		}
+		return moveDoneMsg{count: len(files), clID: clID}
+	}
+}
+
+func (a *App) renderMoveModal() string {
+	content := styleModalTitle.Render(fmt.Sprintf("Move %d file(s) to CL", len(a.moveModal.files))) +
+		"\n\n" +
+		a.moveModal.input.View() +
+		"\n\n" +
+		styleModalHint.Render("number = move to that CL, text = find/create by name, empty = default   enter - confirm   esc - cancel")
+	return styleModalBox.Render(content)
+}
+
 func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {
 	a.opRunning = true
 	a.opName = "Submitting"
@@ -1033,4 +2258,28 @@ func (a *App) cmdSubmitMarkedStart(files []p4.OpenedFile, description string) te
 		ch <- opErrLine(err)
 		close(ch)
 	})
+}
+
+// isNumeric returns true if s consists entirely of digits.
+func isNumeric(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// openWithDefault launches the given local file with the OS default application in the background.
+func openWithDefault(localPath string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", localPath)
+	case "darwin":
+		cmd = exec.Command("open", localPath)
+	default:
+		cmd = exec.Command("xdg-open", localPath)
+	}
+	return cmd.Start()
 }
