@@ -595,27 +595,40 @@ func (c *Client) shelvedFiles(clID string) ([]ShelvedFile, error) {
 }
 
 // UnshelveAndDelete unshelves files from a CL back into the workspace and deletes the shelf.
-// When c.Stream is set, passes -S <stream> so files are mapped through the stream graph,
-// enabling cross-stream unshelve (e.g. shelf from main unshelved into dev).
+// First tries a plain unshelve; if no files are unshelved (cross-stream case) and c.Stream is
+// set, retries with -S <stream> to remap files through the stream graph.
 // If files were unshelved but p4 also reports an error (e.g. needs resolve), the shelf is
 // preserved and the error is returned so the user can resolve before re-trying.
 func (c *Client) UnshelveAndDelete(clID string) error {
-	args := append(c.globalFlags(), "unshelve", "-s", clID)
-	if c.Stream != "" {
-		args = append(args, "-S", c.Stream)
+	tryUnshelve := func(extraArgs ...string) (out string, runErr error) {
+		args := append(c.globalFlags(), "unshelve", "-s", clID)
+		args = append(args, extraArgs...)
+		cmd := exec.Command("p4", args...)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+		out = stdout.String() + stderr.String()
+		return
 	}
-	cmd := exec.Command("p4", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
 
-	out := stdout.String() + stderr.String()
+	out, runErr := tryUnshelve()
 	unshelved := strings.Contains(out, " - unshelved")
+
+	// If nothing was unshelved and we have a stream, retry with -S for cross-stream remapping.
+	if !unshelved && c.Stream != "" {
+		out2, runErr2 := tryUnshelve("-S", c.Stream)
+		if strings.Contains(out2, " - unshelved") {
+			out, runErr = out2, runErr2
+			unshelved = true
+		}
+	}
+
+	unshelved = strings.Contains(out, " - unshelved")
 	needsResolve := strings.Contains(out, "needs resolve")
 
 	if runErr != nil && !unshelved {
-		return fmt.Errorf("unshelve: %s: %s", runErr, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("unshelve: %s: %s", runErr, strings.TrimSpace(out))
 	}
 	if !unshelved {
 		return fmt.Errorf("no files unshelved — shelf was preserved")
