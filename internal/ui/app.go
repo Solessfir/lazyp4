@@ -1099,6 +1099,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.active = order[n]
 			a.updateFocus()
 		}
+		if a.historyMode {
+			return a, a.cmdFilelogForSelection()
+		}
 		return a, nil
 	case "tab":
 		a.cycleFocus()
@@ -1959,6 +1962,29 @@ func (a *App) cmdDiff(clientFile string) tea.Cmd {
 	}
 }
 
+// cmdFilelogForSelection returns a filelog command for whatever is currently selected,
+// used when switching panes in history mode.
+func (a *App) cmdFilelogForSelection() tea.Cmd {
+	if a.active == paneFileList {
+		if f := a.fileList.SelectedFile(); f != nil {
+			return a.cmdFilelog(f.DepotFile)
+		}
+		if dp := a.fileList.SelectedDepotPath(); dp != "" {
+			return a.cmdFilelogMax(dp, 100)
+		}
+	}
+	if a.active == paneBrowser {
+		if path := a.browserPane.SelectedPath(); path != "" {
+			max := 0
+			if strings.HasSuffix(path, "/...") {
+				max = 100
+			}
+			return a.cmdFilelogMax(path, max)
+		}
+	}
+	return nil
+}
+
 func (a *App) cmdFilelog(depotFile string) tea.Cmd {
 	return a.cmdFilelogMax(depotFile, 0)
 }
@@ -2088,64 +2114,66 @@ func (a *App) shelveAndRevert(cl p4.Changelist) error {
 	return nil
 }
 
-// shelveAndRevertWithDesc is like shelveAndRevert but passes an inline description
-// for the default CL to avoid opening an editor.
-func (a *App) shelveAndRevertWithDesc(cl p4.Changelist, desc string) error {
-	if len(cl.Files) == 0 {
-		return nil
-	}
-	clID := cl.ID
-	clientFiles := make([]string, len(cl.Files))
-	for i, f := range cl.Files {
-		clientFiles[i] = f.ClientFile
-	}
-	// For the default CL, create a numbered CL first (same flow as the shelve modal).
-	if clID == "" || clID == "default" {
-		newID, err := a.client.CreateChange(desc)
-		if err != nil {
-			return fmt.Errorf("create CL: %w", err)
-		}
-		for _, f := range cl.Files {
-			if _, err := a.client.Reopen(newID, f.ClientFile); err != nil {
-				return fmt.Errorf("reopen file: %w", err)
-			}
-		}
-		clID = newID
-	}
-	if _, err := a.client.Shelve(clID); err != nil {
-		return fmt.Errorf("shelve CL %s: %w", clID, err)
-	}
-	if _, err := a.client.RevertFiles(clientFiles); err != nil {
-		return fmt.Errorf("revert CL %s: %w", clID, err)
-	}
-	return nil
-}
 
-// cmdSwitchToStream runs p4 switch directly — fast, no workspace listing needed.
+// cmdSwitchToStream moves any numbered-CL files to the default CL (p4 switch requires it),
+// then switches. p4 switch handles default-CL files natively.
 func (a *App) cmdSwitchToStream(stream string) tea.Cmd {
 	a.status = "Switching to " + stream + "..."
+	var numberedFiles []p4.OpenedFile
+	for _, cl := range a.fileList.Changelists() {
+		if cl.ID != "default" {
+			numberedFiles = append(numberedFiles, cl.Files...)
+		}
+	}
 	return func() tea.Msg {
+		for _, f := range numberedFiles {
+			if _, err := a.client.Reopen("default", f.ClientFile); err != nil {
+				return streamSwitchedMsg{stream: stream, err: err}
+			}
+		}
 		err := a.client.SwitchToStream(stream)
 		return streamSwitchedMsg{stream: stream, err: err}
 	}
 }
 
 
-// cmdShelveForCheckout shelves all open CLs, reverts all files, then syncs to the target CL.
+
+// cmdShelveForCheckout consolidates all open files into one shelf, reverts them, then syncs.
 func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
 	a.checkout = nil
 	a.status = fmt.Sprintf("Shelving open files before sync to CL %s...", co.cl)
 	stream := co.stream
 	cl := co.cl
-	cls := a.fileList.Changelists()
+	var allFiles []p4.OpenedFile
+	for _, c := range a.fileList.Changelists() {
+		allFiles = append(allFiles, c.Files...)
+	}
+	currentCL := a.client.CurrentCL()
+	desc := "CL " + currentCL + " → CL " + cl
+	if currentCL == "" {
+		desc = "→ CL " + cl
+	}
 	return func() tea.Msg {
-		for _, c := range cls {
-			if err := a.shelveAndRevertWithDesc(c, "Before checkout to CL "+cl); err != nil {
+		clID, err := a.client.CreateChange(desc)
+		if err != nil {
+			return syncToCLDoneMsg{cl: cl, err: err}
+		}
+		for _, f := range allFiles {
+			if _, err := a.client.Reopen(clID, f.ClientFile); err != nil {
 				return syncToCLDoneMsg{cl: cl, err: err}
 			}
 		}
-		err := a.client.SyncToCL(stream, cl)
-		return syncToCLDoneMsg{cl: cl, err: err}
+		if _, err := a.client.Shelve(clID); err != nil {
+			return syncToCLDoneMsg{cl: cl, err: err}
+		}
+		clientFiles := make([]string, len(allFiles))
+		for i, f := range allFiles {
+			clientFiles[i] = f.ClientFile
+		}
+		if _, err := a.client.RevertFiles(clientFiles); err != nil {
+			return syncToCLDoneMsg{cl: cl, err: err}
+		}
+		return syncToCLDoneMsg{cl: cl, err: a.client.SyncToCL(stream, cl)}
 	}
 }
 

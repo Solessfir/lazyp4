@@ -383,6 +383,21 @@ func (c *Client) SubmitMarked(files []OpenedFile, description string) error {
 	return err
 }
 
+// CurrentCL returns the highest CL currently synced in the workspace.
+func (c *Client) CurrentCL() string {
+	args := []string{"changes", "-m1", "@" + c.Workspace}
+	out, err := c.run(args...)
+	if err != nil || strings.TrimSpace(out) == "" {
+		return ""
+	}
+	// "Change N on date by user@client 'desc'"
+	parts := strings.Fields(out)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return ""
+}
+
 // Filelog returns revision history for a depot file.
 // Pass max > 0 to limit results (p4 filelog -m max).
 func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
