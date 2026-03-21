@@ -219,6 +219,7 @@ func (c *Client) Shelve(clID string) (string, error) {
 	return c.run("shelve", "-c", clID)
 }
 
+
 // ShelveFiles shelves specific files from a changelist.
 func (c *Client) ShelveFiles(clID string, clientFiles []string) (string, error) {
 	args := append([]string{"shelve", "-c", clID}, clientFiles...)

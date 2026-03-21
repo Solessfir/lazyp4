@@ -301,19 +301,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.status = "Cancelled"
 			case "enter", "y", "Y":
 				if co.hasFiles && !co.shelving {
-					// User chose to shelve first
 					co.shelving = true
 					return a, a.cmdShelveForCheckout(co)
 				}
-				// No open files, or shelve done: sync now
 				a.checkout = nil
 				return a, a.cmdSyncToCL(co.stream, co.cl)
-			case "s", "S":
-				if co.hasFiles && !co.shelving {
-					// Skip shelve, sync directly
-					a.checkout = nil
-					return a, a.cmdSyncToCL(co.stream, co.cl)
-				}
 			}
 		}
 		return a, nil
@@ -741,7 +733,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Workspace synced to CL %s", m.cl)
 			a.cmdLog.Add("p4 sync @"+m.cl, "done")
 		}
-		return a, tea.Batch(a.refresh(), a.cmdFetch())
+		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdLoadShelved())
 
 	case streamSwitchedMsg:
 		a.streamSwitch = nil
@@ -1656,7 +1648,7 @@ func (a *App) renderHotkeys() string {
 		}
 	case paneLog:
 		if a.historyMode {
-			local = []binding{{"Checkout", "space"}}
+			local = []binding{{"Checkout", "enter"}}
 		}
 	}
 
@@ -1717,7 +1709,7 @@ func (a *App) renderCheckoutModal() string {
 			"\n\n" +
 			styleStatus.Render("You have open files in your workspace.") +
 			"\n\n" +
-			styleModalHint.Render("y / enter - shelve open files then sync\ns         - sync without shelving\nesc / n   - cancel")
+			styleModalHint.Render("enter / y - shelve open files then sync\nesc / n   - cancel")
 	} else {
 		content = styleModalTitle.Render(fmt.Sprintf("Sync workspace to CL %s?", co.cl)) +
 			"\n\n" +
@@ -2079,8 +2071,6 @@ func (a *App) cmdSyncToCL(stream, cl string) tea.Cmd {
 }
 
 // shelveAndRevert shelves all files in a changelist and reverts them.
-// Shelve handles "default" with bare `p4 shelve`; revert uses explicit paths
-// so it works for both the default CL and numbered CLs.
 func (a *App) shelveAndRevert(cl p4.Changelist) error {
 	if len(cl.Files) == 0 {
 		return nil
@@ -2094,6 +2084,39 @@ func (a *App) shelveAndRevert(cl p4.Changelist) error {
 	}
 	if _, err := a.client.RevertFiles(clientFiles); err != nil {
 		return fmt.Errorf("revert CL %s: %w", cl.ID, err)
+	}
+	return nil
+}
+
+// shelveAndRevertWithDesc is like shelveAndRevert but passes an inline description
+// for the default CL to avoid opening an editor.
+func (a *App) shelveAndRevertWithDesc(cl p4.Changelist, desc string) error {
+	if len(cl.Files) == 0 {
+		return nil
+	}
+	clID := cl.ID
+	clientFiles := make([]string, len(cl.Files))
+	for i, f := range cl.Files {
+		clientFiles[i] = f.ClientFile
+	}
+	// For the default CL, create a numbered CL first (same flow as the shelve modal).
+	if clID == "" || clID == "default" {
+		newID, err := a.client.CreateChange(desc)
+		if err != nil {
+			return fmt.Errorf("create CL: %w", err)
+		}
+		for _, f := range cl.Files {
+			if _, err := a.client.Reopen(newID, f.ClientFile); err != nil {
+				return fmt.Errorf("reopen file: %w", err)
+			}
+		}
+		clID = newID
+	}
+	if _, err := a.client.Shelve(clID); err != nil {
+		return fmt.Errorf("shelve CL %s: %w", clID, err)
+	}
+	if _, err := a.client.RevertFiles(clientFiles); err != nil {
+		return fmt.Errorf("revert CL %s: %w", clID, err)
 	}
 	return nil
 }
@@ -2117,7 +2140,7 @@ func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
 	cls := a.fileList.Changelists()
 	return func() tea.Msg {
 		for _, c := range cls {
-			if err := a.shelveAndRevert(c); err != nil {
+			if err := a.shelveAndRevertWithDesc(c, "Before checkout to CL "+cl); err != nil {
 				return syncToCLDoneMsg{cl: cl, err: err}
 			}
 		}
