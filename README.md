@@ -11,9 +11,9 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - File revision history
 - Mark individual files for partial submit
 - Shelve changelists
-- Fetch (dry-run sync) — see how many files are pending before committing to a sync
+- Fetch (dry-run sync) - see how many files are pending before committing to a sync
 - Conflict resolution via external merge tool
-- Mouse support — click to focus panes and select files
+- Mouse support - click to focus panes and select files
 - Keyboard-driven with lazygit-style numbered pane shortcuts
 
 ## Requirements
@@ -57,8 +57,8 @@ Environment variables `P4PORT`, `P4USER`, and `P4CLIENT` override the config fil
 | `esc` | Back to Files pane |
 | `enter` | Expand / collapse directory |
 | `space` | Mark / unmark file (or whole directory) for partial submit |
-| `s` | Submit — opens description prompt; uses marked files if any |
-| `d` | Discard (revert) — confirmation prompt; uses marked files if any |
+| `s` | Submit - opens description prompt; uses marked files if any |
+| `d` | Discard (revert) - confirmation prompt; uses marked files if any |
 | `S` | Sync with progress bar |
 | `c` | Cancel current operation (sync or submit) |
 | `f` | Fetch — dry-run sync, shows pending file count |
