@@ -10,11 +10,14 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Colorized unified diff viewer
 - File revision history
 - Mark individual files for partial submit
-- Shelve changelists
+- Shelve and unshelve changelists (including cross-stream via `-S`)
+- Stream switching (`p4 switch`)
 - Fetch (dry-run sync) - see how many files are pending before committing to a sync
-- Conflict resolution via external merge tool
+- Conflict resolution — external merge tool, auto-resolve (accept theirs/yours/safe)
+- `[?]` indicator on files needing resolve
 - Mouse support - click to focus panes and select files
 - Keyboard-driven with lazygit-style numbered pane shortcuts
+- Context-sensitive hotkey bar
 
 ## Requirements
 
@@ -52,22 +55,35 @@ Environment variables `P4PORT`, `P4USER`, and `P4CLIENT` override the config fil
 |-----|--------|
 | `j` / `k` | Navigate up / down |
 | `h` / `l` or `←` / `→` | Cycle pane focus left / right |
-| `1` – `4` | Jump to pane: Files / History / Diff / Log |
+| `1` – `5` | Jump to pane: Files / History / Diff / Log / Conflicts |
 | `tab` | Cycle pane focus forward |
 | `esc` | Back to Files pane |
 | `enter` | Expand / collapse directory |
 | `space` | Mark / unmark file (or whole directory) for partial submit |
 | `s` | Submit - opens description prompt; uses marked files if any |
+| `e` / `E` | Shelve (with revert) / shelve only |
+| `u` | Unshelve selected shelf |
 | `d` | Discard (revert) - confirmation prompt; uses marked files if any |
 | `S` | Sync with progress bar |
 | `c` | Cancel current operation (sync or submit) |
 | `f` | Fetch — dry-run sync, shows pending file count |
 | `r` | Refresh file list |
+| `g` | Toggle history mode |
 | `t` | Toggle tree / flat view |
 | `L` | File log for selected file |
-| `R` | Show conflicts |
+| `R` | Show conflicts (scoped to file or folder) |
 | `?` | Keybindings help |
 | `q` | Quit |
+
+### Conflicts pane
+
+| Key | Action |
+|-----|--------|
+| `enter` | Open merge tool (`$P4MERGE` or `$EDITOR`) |
+| `a` | Auto-resolve (accept theirs, then branch) |
+| `y` | Auto-resolve (accept yours) |
+| `s` | Auto-resolve (safe) |
+| `esc` | Close conflicts pane |
 
 ## Disclaimer
 
