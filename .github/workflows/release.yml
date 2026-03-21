@@ -47,6 +47,10 @@ jobs:
           name: lazyp4-${{ github.sha }}
           path: dist/
 
+      - name: Short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
       - name: Delete existing release
         run: gh release delete latest --yes --cleanup-tag || true
         env:
@@ -56,5 +60,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest (${{ github.sha }})
+          name: Latest · ${{ steps.sha.outputs.short }}
           files: dist/*
