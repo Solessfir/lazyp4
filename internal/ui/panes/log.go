@@ -179,7 +179,12 @@ func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool)
 		}
 		sb.WriteByte('\n')
 		line++
-		meta := fmt.Sprintf("  %s  %s", e.Action, e.Client)
+		var meta string
+		if e.Action != "" {
+			meta = fmt.Sprintf("  %s  %s", e.Action, e.Client)
+		} else {
+			meta = fmt.Sprintf("  %s", e.Client)
+		}
 		sb.WriteString(styleLogMeta.Render(meta))
 		sb.WriteByte('\n')
 		line++

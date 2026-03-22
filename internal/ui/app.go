@@ -78,6 +78,32 @@ type streamSwitchModal struct {
 	switching bool   // p4 switch in flight
 }
 
+// integrateModal is shown when the user presses `i` in the Streams pane (stream depot)
+// or globally (classic depot). For streams it shows merge/copy choice; for classic it
+// collects source and target paths.
+type integrateModal struct {
+	targetStream string // stream depots: the selected target stream
+	isClassic    bool   // true = classic depot, show path inputs
+	step         int    // classic only: 0=source input, 1=target input
+	sourceInput  textinput.Model
+	targetInput  textinput.Model
+}
+
+func newIntegrateModalStream(target string) *integrateModal {
+	return &integrateModal{targetStream: target}
+}
+
+func newIntegrateModalClassic() *integrateModal {
+	src := textinput.New()
+	src.Placeholder = "Source path, e.g. //depot/main/..."
+	src.Width = 50
+	src.Focus()
+	dst := textinput.New()
+	dst.Placeholder = "Target path, e.g. //depot/dev/..."
+	dst.Width = 50
+	return &integrateModal{isClassic: true, sourceInput: src, targetInput: dst}
+}
+
 // authModal is shown when the p4 ticket has expired and a password is needed.
 type authModal struct {
 	input textinput.Model
@@ -217,6 +243,12 @@ type streamSwitchedMsg struct {
 	err    error
 }
 
+type integrateDoneMsg struct {
+	op  string // "merge", "copy", or "integrate"
+	src string
+	err error
+}
+
 type opLineMsg struct{ line string }
 type opEndMsg struct{ err error }
 
@@ -262,8 +294,9 @@ type App struct {
 	moveModal    *moveCLModal
 	confirm      *confirmModal
 	checkout     *checkoutModal
-	streamSwitch *streamSwitchModal
-	authModal    *authModal
+	streamSwitch    *streamSwitchModal
+	integrateModal  *integrateModal
+	authModal       *authModal
 	showHelp     bool
 	selectMode   bool // mouse disabled so terminal can select text
 	helpViewport viewport.Model
@@ -307,6 +340,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.authModal != nil {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			return a.handleAuthKey(m)
+		}
+	}
+	// Integrate modal captures all key input when open.
+	if a.integrateModal != nil {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			return a.handleIntegrateKey(m)
 		}
 	}
 
@@ -476,6 +515,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return a, tea.Batch(cmds...)
 			}
+			// No pending files and pending pane is focused (or history mode on):
+			// show full stream history so the user has something useful to look at.
+			if (a.active == paneFileList || a.historyMode) && !a.fileList.HasFiles() {
+				a.historyMode = true
+				if root := a.browserPane.RootPath(); root != "" {
+					return a, a.cmdFilelogMax(depotWildcard(root), 100)
+				}
+			}
 		}
 		return a, nil
 
@@ -579,6 +626,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if opName == "Submitting" {
 			a.fileList.ClearMarks()
+			cmds = append(cmds, a.cmdFetch())
 		}
 		cmds = append(cmds, a.refresh())
 		if opName == "Syncing" {
@@ -763,6 +811,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = "marked for delete: " + m.path
 			a.cmdLog.Add("p4 delete "+m.path, "done")
+		}
+		return a, a.refresh()
+
+	case integrateDoneMsg:
+		cmd := "p4 " + m.op + " " + m.src
+		if m.err != nil {
+			a.status = m.op + " failed - see log"
+			a.cmdLog.Add(cmd, "error: "+m.err.Error())
+		} else {
+			a.status = m.op + " complete — resolve if needed, then submit"
+			a.cmdLog.Add(cmd, "done")
 		}
 		return a, a.refresh()
 
@@ -951,6 +1010,12 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.DisableMouse
 	case "q", "ctrl+c":
 		return a, tea.Quit
+	case "i":
+		if !a.isStreamDepot {
+			a.integrateModal = newIntegrateModalClassic()
+			return a, textinput.Blink
+		}
+		// stream depot: fall through to pane-specific handler below
 	case "r":
 		a.status = "Refreshing..."
 		cmds := []tea.Cmd{a.refresh()}
@@ -1233,12 +1298,28 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case paneStreams:
 		cmd = a.streamsPane.Update(m)
-		if m.String() == "enter" {
+		switch m.String() {
+		case "enter":
 			stream := a.streamsPane.SelectedStream()
 			if stream != "" {
 				sw := &streamSwitchModal{stream: stream, switching: true}
 				a.streamSwitch = sw
 				return a, tea.Batch(cmd, a.cmdSwitchToStream(stream))
+			}
+		case "i":
+			stream := a.streamsPane.SelectedStream()
+			if stream != "" && stream != a.client.Stream {
+				rel := a.detectIntegration(stream)
+				switch rel.op {
+				case "merge":
+					return a, tea.Batch(cmd, a.cmdMergeStream(stream))
+				case "copy":
+					return a, tea.Batch(cmd, a.cmdCopyStream(stream))
+				default:
+					// ambiguous — show modal to let user choose
+					a.integrateModal = newIntegrateModalStream(stream)
+					return a, nil
+				}
 			}
 		}
 	case paneShelved:
@@ -1285,6 +1366,58 @@ func (a *App) handleFilterClear(_ tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *App) handleStreamSwitchKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// While p4 switch is running, ignore all keys.
 	return a, nil
+}
+
+func (a *App) handleIntegrateKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	im := a.integrateModal
+	switch m.String() {
+	case "esc":
+		a.integrateModal = nil
+		return a, nil
+	}
+	if !im.isClassic {
+		// Stream depot: m = merge from, c = copy to
+		switch m.String() {
+		case "m":
+			target := im.targetStream
+			a.integrateModal = nil
+			return a, a.cmdMergeStream(target)
+		case "c":
+			target := im.targetStream
+			a.integrateModal = nil
+			return a, a.cmdCopyStream(target)
+		}
+		return a, nil
+	}
+	// Classic depot: two-step path input
+	switch m.String() {
+	case "enter":
+		if im.step == 0 {
+			if im.sourceInput.Value() == "" {
+				return a, nil
+			}
+			im.step = 1
+			im.sourceInput.Blur()
+			im.targetInput.Focus()
+			return a, textinput.Blink
+		}
+		// step 1 — submit
+		src := im.sourceInput.Value()
+		dst := im.targetInput.Value()
+		if dst == "" {
+			return a, nil
+		}
+		a.integrateModal = nil
+		return a, a.cmdIntegrateClassic(src, dst)
+	default:
+		var cmd tea.Cmd
+		if im.step == 0 {
+			im.sourceInput, cmd = im.sourceInput.Update(m)
+		} else {
+			im.targetInput, cmd = im.targetInput.Update(m)
+		}
+		return a, cmd
+	}
 }
 
 func (a *App) handleAuthKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1636,6 +1769,9 @@ func (a *App) View() string {
 	if a.authModal != nil {
 		return overlayCenter(a.renderAuthModal(), base, a.width, a.height)
 	}
+	if a.integrateModal != nil {
+		return overlayCenter(a.renderIntegrateModal(), base, a.width, a.height)
+	}
 	if a.streamSwitch != nil {
 		return overlayCenter(a.renderStreamSwitchModal(), base, a.width, a.height)
 	}
@@ -1753,7 +1889,7 @@ func (a *App) renderHotkeys() string {
 			{"Delete shelf", "d"},
 		}
 	case paneStreams:
-		local = []binding{{"Switch stream", "enter"}}
+		local = []binding{{"Switch stream", "enter"}, {"Integrate", "i"}}
 	case paneResolve:
 		local = []binding{
 			{"Merge", "enter"},
@@ -1775,6 +1911,9 @@ func (a *App) renderHotkeys() string {
 		{"Sync", "S"},
 		{"Refresh", "r"},
 		{"?", "help"},
+	}
+	if !a.isStreamDepot {
+		global = append([]binding{{"Integrate", "i"}}, global...)
 	}
 
 	shown := local
@@ -1841,6 +1980,62 @@ func (a *App) renderAuthModal() string {
 		"\n\n" +
 		styleModalHint.Render("enter - login   ctrl+enter - login & remember   esc - cancel")
 	return styleModalBox.Render(content)
+}
+
+// integrateRelation describes the relationship between current and target streams.
+type integrateRelation struct {
+	op         string // "merge", "copy", or "" (ambiguous)
+	upstream   string // short name of the parent stream
+	downstream string // short name of the child stream
+}
+
+// detectIntegration determines whether to merge or copy based on the stream graph.
+// op == "" means the relationship is ambiguous (siblings/unrelated).
+func (a *App) detectIntegration(target string) integrateRelation {
+	shortName := func(p string) string {
+		if idx := strings.LastIndex(p, "/"); idx >= 0 {
+			return p[idx+1:]
+		}
+		return p
+	}
+	current := a.client.Stream
+	for _, s := range a.streams {
+		if s.Path == target && s.Parent == current {
+			// target is child of current → copy down (upstream→downstream)
+			return integrateRelation{"copy", shortName(current), shortName(target)}
+		}
+		if s.Path == current && s.Parent == target {
+			// current is child of target → merge up (downstream→upstream)
+			return integrateRelation{"merge", shortName(target), shortName(current)}
+		}
+	}
+	// ambiguous: siblings or unrelated
+	return integrateRelation{"", shortName(target), shortName(current)}
+}
+
+func (a *App) renderIntegrateModal() string {
+	im := a.integrateModal
+	if !im.isClassic {
+		rel := a.detectIntegration(im.targetStream)
+		content := styleModalTitle.Render("Integrate — ambiguous direction") +
+			"\n\n" +
+			styleModalHint.Render(
+				fmt.Sprintf("c  Copy   %s → %s\nm  Merge  %s → %s\nesc  cancel",
+					rel.upstream, rel.downstream, rel.downstream, rel.upstream),
+			)
+		return styleModalBox.Render(content)
+	}
+	// Classic depot
+	title := styleModalTitle.Render("Integrate")
+	var body string
+	if im.step == 0 {
+		body = "Source path:\n" + im.sourceInput.View() +
+			"\n\n" + styleModalHint.Render("enter - next   esc - cancel")
+	} else {
+		body = "Source: " + im.sourceInput.Value() + "\nTarget path:\n" + im.targetInput.View() +
+			"\n\n" + styleModalHint.Render("enter - integrate   esc - cancel")
+	}
+	return styleModalBox.Render(title + "\n\n" + body)
 }
 
 func (a *App) renderStreamSwitchModal() string {
@@ -1927,6 +2122,7 @@ func (a *App) helpContent() string {
 	case paneStreams:
 		local = []row{
 			{k: "enter", desc: "Switch workspace to selected stream"},
+			{k: "i", desc: "Integrate (merge/copy)"},
 		}
 	case paneShelved:
 		local = []row{
@@ -1960,6 +2156,9 @@ func (a *App) helpContent() string {
 		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
 		{k: "q", desc: "Quit"},
 		{k: "?", desc: "Close this window"},
+	}
+	if !a.isStreamDepot {
+		global = append([]row{{k: "i", desc: "Integrate (classic depot)"}}, global...)
 	}
 
 	var rows []row
@@ -2122,7 +2321,13 @@ func (a *App) cmdFilelog(depotFile string) tea.Cmd {
 
 func (a *App) cmdFilelogMax(depotFile string, max int) tea.Cmd {
 	return func() tea.Msg {
-		entries, err := a.client.Filelog(depotFile, max)
+		var entries []p4.FilelogEntry
+		var err error
+		if strings.HasSuffix(depotFile, "/...") || strings.HasSuffix(depotFile, "...") {
+			entries, err = a.client.Changes(depotFile, max)
+		} else {
+			entries, err = a.client.Filelog(depotFile, max)
+		}
 		return logDoneMsg{entries: entries, err: err}
 	}
 }
@@ -2222,6 +2427,33 @@ func (a *App) cmdBrowserDelete(path string) tea.Cmd {
 	return func() tea.Msg {
 		err := a.client.DeletePath(path)
 		return browserDeleteDoneMsg{path: path, err: err}
+	}
+}
+
+func (a *App) cmdMergeStream(target string) tea.Cmd {
+	a.status = "Merging from " + target + "..."
+	return func() tea.Msg {
+		out, err := a.client.MergeStream(target)
+		_ = out
+		return integrateDoneMsg{op: "merge", src: target, err: err}
+	}
+}
+
+func (a *App) cmdCopyStream(target string) tea.Cmd {
+	a.status = "Copying to " + target + "..."
+	return func() tea.Msg {
+		out, err := a.client.CopyStream(target)
+		_ = out
+		return integrateDoneMsg{op: "copy", src: target, err: err}
+	}
+}
+
+func (a *App) cmdIntegrateClassic(source, target string) tea.Cmd {
+	a.status = "Integrating " + source + " → " + target + "..."
+	return func() tea.Msg {
+		out, err := a.client.IntegrateClassic(source, target)
+		_ = out
+		return integrateDoneMsg{op: "integrate", src: source + " → " + target, err: err}
 	}
 }
 

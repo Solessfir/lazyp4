@@ -233,6 +233,11 @@ func (c *Client) Submit(clID, description string) (string, error) {
 
 // SubmitStreaming submits a changelist and streams output lines into lines.
 func (c *Client) SubmitStreaming(ctx context.Context, clID, description string, lines chan<- string) error {
+	if description != "" {
+		if err := c.UpdateChangeDescription(clID, description); err != nil {
+			return fmt.Errorf("update description: %w", err)
+		}
+	}
 	args := append(c.globalFlags(), "submit", "-c", clID)
 	return c.streamCommand(ctx, lines, args...)
 }
@@ -353,6 +358,33 @@ func (c *Client) DeleteChange(clID string) error {
 }
 
 // CreateChange creates a new pending changelist and returns its ID.
+// UpdateChangeDescription updates the description of an existing numbered CL.
+func (c *Client) UpdateChangeDescription(clID, description string) error {
+	out, err := c.run("change", "-o", clID)
+	if err != nil {
+		return err
+	}
+	// Replace description field — everything after "Description:\t" until the next field
+	lines := strings.Split(out, "\n")
+	var result []string
+	skip := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Description:") {
+			result = append(result, "Description:\t"+description)
+			skip = true
+			continue
+		}
+		if skip && (line == "" || line[0] == '\t' || line[0] == ' ') {
+			continue // skip old description continuation lines
+		}
+		skip = false
+		result = append(result, line)
+	}
+	spec := strings.Join(result, "\n")
+	_, err = c.runWithStdin(spec, "change", "-i")
+	return err
+}
+
 func (c *Client) CreateChange(description string) (string, error) {
 	spec := "Change:\tnew\nDescription:\t" + description + "\n"
 	out, err := c.runWithStdin(spec, "change", "-i")
@@ -396,6 +428,66 @@ func (c *Client) CurrentCL() string {
 		return parts[1]
 	}
 	return ""
+}
+
+// Changes returns submitted changelists that affected the given depot path.
+// Use for directories/stream wildcards (path ending in /...) to avoid duplicate entries per file.
+func (c *Client) Changes(path string, max int) ([]FilelogEntry, error) {
+	args := []string{"changes", "-l", "-s", "submitted"}
+	if max > 0 {
+		args = append(args, "-m", strconv.Itoa(max))
+	}
+	args = append(args, path)
+	out, err := c.run(args...)
+	if err != nil {
+		return nil, err
+	}
+	// Output format:
+	// Change N on YYYY/MM/DD by user@client 'desc ...'
+	// <blank line>
+	// \tdescription continuation
+	var entries []FilelogEntry
+	var current *FilelogEntry
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Change ") {
+			if current != nil {
+				current.Description = strings.TrimSpace(current.Description)
+				entries = append(entries, *current)
+			}
+			// "Change N on YYYY/MM/DD by user@client 'desc'"
+			parts := strings.Fields(line)
+			if len(parts) < 5 {
+				continue
+			}
+			cl := parts[1]
+			date := parts[3]
+			if ts, err2 := time.Parse("2006/01/02", date); err2 == nil {
+				date = ts.Format("2006-01-02")
+			}
+			// user@client
+			userClient := parts[5]
+			user, client := userClient, ""
+			if idx := strings.Index(userClient, "@"); idx >= 0 {
+				user = userClient[:idx]
+				client = userClient[idx+1:]
+			}
+			current = &FilelogEntry{
+				Change: cl,
+				Date:   date,
+				Author: user,
+				Client: client,
+			}
+			continue
+		}
+		if current != nil && (strings.HasPrefix(line, "\t") || line == "") {
+			current.Description += strings.TrimPrefix(line, "\t") + "\n"
+		}
+	}
+	if current != nil {
+		current.Description = strings.TrimSpace(current.Description)
+		entries = append(entries, *current)
+	}
+	return entries, nil
 }
 
 // Filelog returns revision history for a depot file.
@@ -896,6 +988,23 @@ func (c *Client) SyncFile(depotPath string) error {
 func (c *Client) DeletePath(path string) error {
 	_, err := c.run("delete", path)
 	return err
+}
+
+// MergeStream merges changes from targetStream into the current stream workspace.
+// Used when pulling changes from a higher-type (e.g. parent) stream.
+func (c *Client) MergeStream(targetStream string) (string, error) {
+	return c.run("merge", "-S", targetStream)
+}
+
+// CopyStream copies changes from the current stream to targetStream.
+// Used when pushing changes to a higher-type (e.g. parent) stream.
+func (c *Client) CopyStream(targetStream string) (string, error) {
+	return c.run("copy", "-S", targetStream)
+}
+
+// IntegrateClassic integrates files from source to target using classic (non-stream) depot paths.
+func (c *Client) IntegrateClassic(source, target string) (string, error) {
+	return c.run("integrate", source, target)
 }
 
 // SyncDryRun runs p4 sync -n and returns the number of files that would be updated.
