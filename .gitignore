@@ -31,8 +31,9 @@ go.work.sum
 .idea/
 .vscode/
 
-# Built binary
+# Built binaries
 lazyp4
+main
 
 # Local dev Perforce server (not needed by end users)
 docker/
