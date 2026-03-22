@@ -78,19 +78,19 @@ type streamSwitchModal struct {
 	switching bool   // p4 switch in flight
 }
 
-// integrateModal is shown when the user presses `i` in the Streams pane (stream depot)
-// or globally (classic depot). For streams it shows merge/copy choice; for classic it
-// collects source and target paths.
+// integrateModal is shown when the user presses `i` (stream or classic depot).
+// For streams it shows pull/push options relative to the current stream's parent;
+// for classic depots it collects source and target paths.
 type integrateModal struct {
-	targetStream string // stream depots: the selected target stream
+	parentStream string // stream depots: parent of current stream (for display)
 	isClassic    bool   // true = classic depot, show path inputs
 	step         int    // classic only: 0=source input, 1=target input
 	sourceInput  textinput.Model
 	targetInput  textinput.Model
 }
 
-func newIntegrateModalStream(target string) *integrateModal {
-	return &integrateModal{targetStream: target}
+func newIntegrateModalStream(parent string) *integrateModal {
+	return &integrateModal{parentStream: parent}
 }
 
 func newIntegrateModalClassic() *integrateModal {
@@ -1015,6 +1015,12 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.integrateModal = newIntegrateModalClassic()
 			return a, textinput.Blink
 		}
+		if parent := a.currentStreamParent(); parent != "" {
+			a.integrateModal = newIntegrateModalStream(parent)
+			return a, nil
+		}
+		a.status = "Current stream has no parent to integrate with"
+		return a, nil
 		// stream depot: fall through to pane-specific handler below
 	case "r":
 		a.status = "Refreshing..."
@@ -1313,21 +1319,6 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.streamSwitch = sw
 				return a, tea.Batch(cmd, a.cmdSwitchToStream(stream))
 			}
-		case "i":
-			stream := a.streamsPane.SelectedStream()
-			if stream != "" && stream != a.client.Stream {
-				rel := a.detectIntegration(stream)
-				switch rel.op {
-				case "merge":
-					return a, tea.Batch(cmd, a.cmdMergeStream(stream))
-				case "copy":
-					return a, tea.Batch(cmd, a.cmdCopyStream(stream))
-				default:
-					// ambiguous — show modal to let user choose
-					a.integrateModal = newIntegrateModalStream(stream)
-					return a, nil
-				}
-			}
 		}
 	case paneShelved:
 		cmd = a.shelvedPane.Update(m)
@@ -1383,16 +1374,14 @@ func (a *App) handleIntegrateKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if !im.isClassic {
-		// Stream depot: m = merge from, c = copy to
+		// Stream depot: m = pull from parent, c = push to parent.
 		switch m.String() {
 		case "m":
-			target := im.targetStream
 			a.integrateModal = nil
-			return a, a.cmdMergeStream(target)
+			return a, a.cmdMergeStream("")
 		case "c":
-			target := im.targetStream
 			a.integrateModal = nil
-			return a, a.cmdCopyStream(target)
+			return a, a.cmdCopyStream("")
 		}
 		return a, nil
 	}
@@ -2019,46 +2008,33 @@ func (a *App) renderAuthModal() string {
 	return styleModalBox.Render(content)
 }
 
-// integrateRelation describes the relationship between current and target streams.
-type integrateRelation struct {
-	op         string // "merge", "copy", or "" (ambiguous)
-	upstream   string // short name of the parent stream
-	downstream string // short name of the child stream
-}
-
-// detectIntegration determines whether to merge or copy based on the stream graph.
-// op == "" means the relationship is ambiguous (siblings/unrelated).
-func (a *App) detectIntegration(target string) integrateRelation {
-	shortName := func(p string) string {
-		if idx := strings.LastIndex(p, "/"); idx >= 0 {
-			return p[idx+1:]
-		}
-		return p
-	}
-	current := a.client.Stream
+// currentStreamParent returns the parent stream path of the current workspace stream,
+// or "" if the current stream is a root (e.g. mainline) with no parent.
+func (a *App) currentStreamParent() string {
 	for _, s := range a.streams {
-		if s.Path == target && s.Parent == current {
-			// target is child of current → copy down (upstream→downstream)
-			return integrateRelation{"copy", shortName(current), shortName(target)}
-		}
-		if s.Path == current && s.Parent == target {
-			// current is child of target → merge up (downstream→upstream)
-			return integrateRelation{"merge", shortName(target), shortName(current)}
+		if s.Path == a.client.Stream && s.Parent != "" && s.Parent != "none" {
+			return s.Parent
 		}
 	}
-	// ambiguous: siblings or unrelated
-	return integrateRelation{"", shortName(target), shortName(current)}
+	return ""
 }
 
 func (a *App) renderIntegrateModal() string {
 	im := a.integrateModal
 	if !im.isClassic {
-		rel := a.detectIntegration(im.targetStream)
-		content := styleModalTitle.Render("Integrate — ambiguous direction") +
+		shortName := func(p string) string {
+			if idx := strings.LastIndex(p, "/"); idx >= 0 {
+				return p[idx+1:]
+			}
+			return p
+		}
+		parent := shortName(im.parentStream)
+		current := shortName(a.client.Stream)
+		content := styleModalTitle.Render("Integrate") +
 			"\n\n" +
 			styleModalHint.Render(
-				fmt.Sprintf("c  Copy   %s → %s\nm  Merge  %s → %s\nesc  cancel",
-					rel.upstream, rel.downstream, rel.downstream, rel.upstream),
+				fmt.Sprintf("m  Pull  %s → %s\nc  Push  %s → %s\nesc  cancel",
+					parent, current, current, parent),
 			)
 		return styleModalBox.Render(content)
 	}

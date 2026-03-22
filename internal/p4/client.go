@@ -791,9 +791,18 @@ func (c *Client) WhereLocal(depotPath string) (string, error) {
 	return fields[2], nil
 }
 
-// Reconcile runs p4 reconcile on the given path to detect offline changes.
+// Reconcile runs p4 reconcile on the given path to detect offline changes
+// (edit, add, delete). If reconcile finds nothing to open, falls back to
+// p4 edit so the user can check out an unchanged depot file for editing.
 func (c *Client) Reconcile(path string) (string, error) {
-	return c.run("reconcile", path)
+	out, err := c.run("reconcile", path)
+	if err != nil {
+		return out, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return c.run("edit", path)
+	}
+	return out, nil
 }
 
 // BrowserDirs lists immediate subdirectories at the given wildcard path (e.g. "//depot/stream/*").
@@ -1002,16 +1011,16 @@ func (c *Client) DeletePath(path string) error {
 	return err
 }
 
-// MergeStream merges changes from targetStream into the current stream workspace.
-// Used when pulling changes from a higher-type (e.g. parent) stream.
-func (c *Client) MergeStream(targetStream string) (string, error) {
-	return c.run("merge", "-S", targetStream)
+// MergeStream promotes changes from the current (child) stream up to its parent.
+// Run from a child workspace: p4 copy (no -S) copies current stream → parent.
+func (c *Client) MergeStream(_ string) (string, error) {
+	return c.run("copy")
 }
 
-// CopyStream copies changes from the current stream to targetStream.
-// Used when pushing changes to a higher-type (e.g. parent) stream.
+// CopyStream brings changes from the parent stream down into targetStream (child).
+// p4 merge -S child merges from child's parent into the child stream.
 func (c *Client) CopyStream(targetStream string) (string, error) {
-	return c.run("copy", "-S", targetStream)
+	return c.run("merge", "-S", targetStream)
 }
 
 // IntegrateClassic integrates files from source to target using classic (non-stream) depot paths.
