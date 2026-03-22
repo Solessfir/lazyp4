@@ -78,6 +78,20 @@ type streamSwitchModal struct {
 	switching bool   // p4 switch in flight
 }
 
+// authModal is shown when the p4 ticket has expired and a password is needed.
+type authModal struct {
+	input textinput.Model
+}
+
+func newAuthModal() *authModal {
+	ti := textinput.New()
+	ti.Placeholder = "Password..."
+	ti.EchoMode = textinput.EchoPassword
+	ti.Width = 40
+	ti.Focus()
+	return &authModal{input: ti}
+}
+
 func newSubmitModal(clID string, files []p4.OpenedFile) *submitModal {
 	ti := textinput.New()
 	ti.Placeholder = "Changelist description..."
@@ -206,6 +220,9 @@ type streamSwitchedMsg struct {
 type opLineMsg struct{ line string }
 type opEndMsg struct{ err error }
 
+type authRequiredMsg struct{}
+type authDoneMsg struct{ err error }
+
 // App is the root bubbletea model.
 type App struct {
 	client        *p4.Client
@@ -246,6 +263,7 @@ type App struct {
 	confirm      *confirmModal
 	checkout     *checkoutModal
 	streamSwitch *streamSwitchModal
+	authModal    *authModal
 	showHelp     bool
 	selectMode   bool // mouse disabled so terminal can select text
 	helpViewport viewport.Model
@@ -285,6 +303,13 @@ func (a *App) Init() tea.Cmd {
 
 // Update is the main message handler.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Auth modal captures all key input when open.
+	if a.authModal != nil {
+		if m, ok := msg.(tea.KeyMsg); ok {
+			return a.handleAuthKey(m)
+		}
+	}
+
 	// Stream-switch modal captures key input when open; async result messages
 	// must still fall through to the main switch so they are not dropped.
 	if a.streamSwitch != nil {
@@ -759,6 +784,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.cmdLog.Add("p4 sync @"+m.cl, "done")
 		}
 		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdLoadShelved())
+
+	case authRequiredMsg:
+		a.authModal = newAuthModal()
+		a.status = "Session expired — enter password"
+		return a, textinput.Blink
+
+	case authDoneMsg:
+		if m.err != nil {
+			a.status = "login failed: " + m.err.Error()
+			a.cmdLog.Add("p4 login", "error: "+m.err.Error())
+		} else {
+			a.status = "Logged in"
+			a.cmdLog.Add("p4 login", "done")
+			return a, a.refresh()
+		}
+		return a, nil
 
 	case streamSwitchedMsg:
 		a.streamSwitch = nil
@@ -1246,6 +1287,36 @@ func (a *App) handleStreamSwitchKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *App) handleAuthKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.String() {
+	case "esc":
+		a.authModal = nil
+		a.status = "Login cancelled"
+		return a, nil
+	case "enter", "ctrl+enter":
+		save := m.String() == "ctrl+enter"
+		password := a.authModal.input.Value()
+		a.authModal = nil
+		a.status = "Logging in..."
+		return a, func() tea.Msg {
+			if err := a.client.Login(password); err != nil {
+				return authDoneMsg{err: err}
+			}
+			if save {
+				user := a.client.User
+				if err := p4.KeyringSet(user, password); err != nil {
+					return authDoneMsg{err: fmt.Errorf("login ok but keychain save failed: %w", err)}
+				}
+			}
+			return authDoneMsg{}
+		}
+	default:
+		var cmd tea.Cmd
+		a.authModal.input, cmd = a.authModal.input.Update(m)
+		return a, cmd
+	}
+}
+
 func (a *App) setOffline(offline bool) {
 	a.offlineMode = offline
 	a.statusPane.SetOffline(offline)
@@ -1562,6 +1633,9 @@ func (a *App) View() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftSide, rightSide)
 	base := lipgloss.JoinVertical(lipgloss.Left, body, a.cmdLog.View(), a.renderHotkeys())
 
+	if a.authModal != nil {
+		return overlayCenter(a.renderAuthModal(), base, a.width, a.height)
+	}
 	if a.streamSwitch != nil {
 		return overlayCenter(a.renderStreamSwitchModal(), base, a.width, a.height)
 	}
@@ -1760,6 +1834,15 @@ func (a *App) renderCheckoutModal() string {
 	return styleModalBox.Render(content)
 }
 
+func (a *App) renderAuthModal() string {
+	content := styleModalTitle.Render("Session expired") +
+		"\n\n" +
+		a.authModal.input.View() +
+		"\n\n" +
+		styleModalHint.Render("enter - login   ctrl+enter - login & remember   esc - cancel")
+	return styleModalBox.Render(content)
+}
+
 func (a *App) renderStreamSwitchModal() string {
 	sw := a.streamSwitch
 	streamName := sw.stream
@@ -1908,7 +1991,12 @@ func (a *App) helpContent() string {
 
 func (a *App) cmdInfo() tea.Cmd {
 	return func() tea.Msg {
+		// Auto-login from keychain before fetching info.
+		_ = a.client.EnsureLoggedIn(nil) // nil = no interactive prompt; modal handles that
 		info, err := a.client.Info()
+		if err != nil && p4.IsAuthError(err) {
+			return authRequiredMsg{}
+		}
 		return infoFetchedMsg{info: info, err: err}
 	}
 }
@@ -1953,6 +2041,9 @@ func (a *App) refresh() tea.Cmd {
 	return func() tea.Msg {
 		files, err := a.client.OpenedFiles()
 		if err != nil {
+			if p4.IsAuthError(err) {
+				return authRequiredMsg{}
+			}
 			return refreshDoneMsg{err: err}
 		}
 		// Mark files that need resolve.
