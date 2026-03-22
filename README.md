@@ -85,7 +85,7 @@ Press `?` inside the app for context-sensitive help.
 | `b` | Toggle Workspace / Depot Browser |
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
-| `e` | Reconcile file or folder (edit / add / delete) |
+| `space` | Reconcile file or folder (edit / add / delete) |
 | `D` | Mark for delete |
 | `F` | Force sync selected file or folder |
 
