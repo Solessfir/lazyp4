@@ -189,11 +189,6 @@ func (c *Client) Diff(clientFile string) (string, error) {
 	return out, nil
 }
 
-// Sync runs p4 sync.
-func (c *Client) Sync() (string, error) {
-	return c.run("sync")
-}
-
 // SyncToCL syncs the workspace to a specific changelist.
 // For stream depots pass the stream path (e.g. "//depot/main"); for classic depots pass "".
 func (c *Client) SyncToCL(streamPath, cl string) error {
@@ -957,11 +952,6 @@ func toTrackedEntries(depotPaths []string, depotDir, stream, root string) []Work
 }
 
 // AddFile opens a local file for add in the default changelist.
-func (c *Client) AddFile(localPath string) error {
-	_, err := c.run("add", localPath)
-	return err
-}
-
 // OpenedByOthers returns the set of depot paths opened by users other than the current user
 // at the given wildcard (e.g. "//depot/stream/*"). Uses p4 opened -a which is reliable
 // regardless of client view mapping.
@@ -991,18 +981,6 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 		}
 	}
 	return result, nil
-}
-
-// EditFile opens a depot file for edit in the default changelist.
-func (c *Client) EditFile(depotPath string) error {
-	_, err := c.run("edit", depotPath)
-	return err
-}
-
-// SyncFile syncs a single file to the latest revision.
-func (c *Client) SyncFile(depotPath string) error {
-	_, err := c.run("sync", depotPath)
-	return err
 }
 
 // DeletePath marks a file or path (e.g. "//depot/stream/dir/...") for delete.
@@ -1045,26 +1023,6 @@ func (c *Client) SyncDryRun() (int, error) {
 		}
 	}
 	return count, nil
-}
-
-// WorkspacesForStream returns client names owned by the current user that are
-// configured for the given stream path (e.g. "//depot/dev").
-func (c *Client) WorkspacesForStream(streamPath string) ([]string, error) {
-	args := []string{"clients", "-S", streamPath}
-	if c.User != "" {
-		args = append(args, "-u", c.User)
-	}
-	out, err := c.runZtag(args...)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, r := range parseZtag(out) {
-		if name := r["client"]; name != "" {
-			names = append(names, name)
-		}
-	}
-	return names, nil
 }
 
 // SwitchToStream switches the current workspace to the given stream using

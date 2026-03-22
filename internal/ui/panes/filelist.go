@@ -310,15 +310,6 @@ func (p *FileListPane) ClearMarks() {
 // ScrollOffset returns the index of the first visible row (updated each render).
 func (p *FileListPane) ScrollOffset() int { return p.scrollOffset }
 
-// PreferredHeight returns the preferred height based on content (for dynamic layout).
-func (p *FileListPane) PreferredHeight() int {
-	h := len(p.rows) + 2 // +2 for borders
-	if h < 4 {
-		h = 4
-	}
-	return h
-}
-
 // SetCursor moves the cursor to idx, clamped to valid range.
 func (p *FileListPane) SetCursor(idx int) {
 	if idx < 0 {
