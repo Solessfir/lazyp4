@@ -43,12 +43,17 @@ go build -o lazyp4 ./cmd/main.go
 lazyp4 reads `~/.lazyp4.toml`:
 
 ```toml
+# Perforce server address. Use "ssl:" prefix for SSL connections.
 port      = "ssl:your-server:1666"
+
+# Perforce username.
 user      = "youruser"
+
+# Workspace (client) name.
 workspace = "your-workspace"
 ```
 
-Environment variables `P4PORT`, `P4USER`, and `P4CLIENT` override the config file.
+All fields are optional — environment variables `P4PORT`, `P4USER`, and `P4CLIENT` take precedence, and lazyp4 will also pick up whatever is already set in your `p4` environment (e.g. from `p4 set` or `~/.p4enviro`).
 
 ## Keybindings
 
