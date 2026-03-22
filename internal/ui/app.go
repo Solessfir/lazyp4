@@ -1152,7 +1152,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.opCancel()
 		}
 		return a, nil
-	case "h", "left":
+	case "left":
 		a.cycleFocusBackward()
 		return a, nil
 	case "g":
@@ -1180,7 +1180,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.updateFocus()
 		}
 		return a, nil
-	case "l", "right":
+	case "right":
 		a.cycleFocusForward()
 		return a, nil
 	case "R":
@@ -1270,6 +1270,16 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch a.active {
 	case paneBrowser:
+		switch m.String() {
+		case "l":
+			if loadCmd := a.browserPane.ExpandCurrent(); loadCmd != nil {
+				return a, loadCmd
+			}
+			return a, nil
+		case "h":
+			a.browserPane.CollapseCurrentOrParent()
+			return a, nil
+		}
 		cmd = a.browserPane.Update(m)
 		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
 			if a.historyMode {
@@ -1286,12 +1296,19 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case paneFileList:
-		if m.String() == "enter" {
+		switch m.String() {
+		case "enter":
 			if f := a.fileList.SelectedFile(); f != nil {
 				return a, func() tea.Msg {
 					return openFileDoneMsg{err: openWithDefault(f.ClientFile)}
 				}
 			}
+		case "l":
+			a.fileList.ExpandCurrent()
+			return a, nil
+		case "h":
+			a.fileList.CollapseCurrentOrParent()
+			return a, nil
 		}
 		cmd = a.fileList.Update(m)
 		if a.historyMode {
@@ -1312,7 +1329,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case paneStreams:
 		cmd = a.streamsPane.Update(m)
 		switch m.String() {
-		case "enter":
+		case "enter", "l":
 			stream := a.streamsPane.SelectedStream()
 			if stream != "" {
 				sw := &streamSwitchModal{stream: stream, switching: true}
@@ -2111,7 +2128,8 @@ func (a *App) helpContent() string {
 	switch a.active {
 	case paneBrowser:
 		local = []row{
-			{k: "enter", desc: "Expand / collapse directory"},
+			{k: "enter / l", desc: "Expand directory"},
+			{k: "h", desc: "Collapse directory"},
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
@@ -2123,6 +2141,7 @@ func (a *App) helpContent() string {
 		local = []row{
 			{k: "space", desc: "Mark / unmark file for submit"},
 			{k: "enter", desc: "Open file"},
+			{k: "l / h", desc: "Expand / collapse folder"},
 			{k: "s", desc: "Submit (opens description form)"},
 			{k: "e", desc: "Shelve (reverts after)"},
 			{k: "E", desc: "Shelve without reverting"},
@@ -2134,7 +2153,7 @@ func (a *App) helpContent() string {
 		}
 	case paneStreams:
 		local = []row{
-			{k: "enter", desc: "Switch workspace to selected stream"},
+			{k: "enter / l", desc: "Switch workspace to selected stream"},
 			{k: "i", desc: "Integrate (merge/copy)"},
 		}
 	case paneShelved:
@@ -2159,8 +2178,8 @@ func (a *App) helpContent() string {
 	global := []row{
 		{k: "j / k", desc: "Navigate"},
 		{k: "g", desc: "Toggle History / Diff pane"},
-		{k: "h / l", desc: "Cycle panel focus left / right"},
-		{k: "tab", desc: "Cycle panel focus (forward)"},
+		{k: "tab / left / right", desc: "Cycle panel focus"},
+		{k: "1–6", desc: "Jump to pane by number"},
 		{k: "esc", desc: "Back to browser"},
 		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
 		{k: "S", desc: "Sync workspace"},

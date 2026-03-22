@@ -572,6 +572,69 @@ func (p *BrowserPane) toggleOrLoad() tea.Cmd {
 	}
 }
 
+// ExpandCurrent expands the dir under the cursor (or loads it if not yet loaded).
+// Has no effect if the cursor is on a file.
+func (p *BrowserPane) ExpandCurrent() tea.Cmd {
+	rows := p.filteredRows()
+	cur := p.cursor
+	if p.filter != "" {
+		cur = p.filterCursor
+	}
+	if len(rows) == 0 || cur >= len(rows) {
+		return nil
+	}
+	node := rows[cur].node
+	if !node.isDir {
+		return nil
+	}
+	if node.expanded {
+		return nil
+	}
+	return p.toggleOrLoad()
+}
+
+// CollapseCurrentOrParent collapses the dir under the cursor if it is expanded;
+// otherwise moves the cursor to the parent directory and collapses it.
+func (p *BrowserPane) CollapseCurrentOrParent() {
+	rows := p.filteredRows()
+	cur := p.cursor
+	if p.filter != "" {
+		cur = p.filterCursor
+	}
+	if len(rows) == 0 || cur >= len(rows) {
+		return
+	}
+	node := rows[cur].node
+	// If on an expanded dir, collapse it.
+	if node.isDir && node.expanded {
+		node.expanded = false
+		p.rebuild()
+		// Re-find the row since rebuild changed the list.
+		for i, r := range p.filteredRows() {
+			if r.node == node {
+				p.cursor = i
+				break
+			}
+		}
+		return
+	}
+	// Otherwise move to the parent dir and collapse it.
+	// Walk backwards to find the first row with a smaller depth.
+	targetDepth := rows[cur].depth - 1
+	if targetDepth < 0 {
+		return
+	}
+	allRows := p.filteredRows()
+	for i := cur - 1; i >= 0; i-- {
+		if allRows[i].depth == targetDepth && allRows[i].node.isDir {
+			allRows[i].node.expanded = false
+			p.rebuild()
+			p.cursor = i
+			return
+		}
+	}
+}
+
 func (p *BrowserPane) View() string {
 	border := styleBlurBorder
 	if p.focused {

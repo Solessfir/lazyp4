@@ -613,6 +613,69 @@ func (p *FileListPane) toggleDir() {
 	}
 }
 
+// ExpandCurrent expands the dir under the cursor. No-op if already expanded or on a file/header.
+func (p *FileListPane) ExpandCurrent() {
+	if p.cursor < 0 || p.cursor >= len(p.rows) {
+		return
+	}
+	r := p.rows[p.cursor]
+	if r.kind != rowKindDir || p.expanded[r.dirKey] {
+		return
+	}
+	savedKey := r.dirKey
+	p.expanded[savedKey] = true
+	p.rebuildRows()
+	for i, row := range p.rows {
+		if row.dirKey == savedKey {
+			p.cursor = i
+			break
+		}
+	}
+}
+
+// CollapseCurrentOrParent collapses the dir under the cursor if expanded;
+// otherwise moves to the parent dir (or CL header) and collapses it.
+func (p *FileListPane) CollapseCurrentOrParent() {
+	if p.cursor < 0 || p.cursor >= len(p.rows) {
+		return
+	}
+	r := p.rows[p.cursor]
+	// On an expanded dir: collapse it.
+	if r.kind == rowKindDir && p.expanded[r.dirKey] {
+		savedKey := r.dirKey
+		p.expanded[savedKey] = false
+		p.rebuildRows()
+		for i, row := range p.rows {
+			if row.dirKey == savedKey {
+				p.cursor = i
+				break
+			}
+		}
+		return
+	}
+	// On a file or collapsed dir: move to the parent row (smaller depth or header).
+	targetDepth := r.depth - 1
+	for i := p.cursor - 1; i >= 0; i-- {
+		pr := p.rows[i]
+		if pr.kind == rowKindHeader || (pr.kind == rowKindDir && pr.depth == targetDepth) {
+			if pr.kind == rowKindDir && p.expanded[pr.dirKey] {
+				savedKey := pr.dirKey
+				p.expanded[savedKey] = false
+				p.rebuildRows()
+				for j, row := range p.rows {
+					if row.dirKey == savedKey {
+						p.cursor = j
+						break
+					}
+				}
+			} else {
+				p.cursor = i
+			}
+			return
+		}
+	}
+}
+
 // buildFilteredIdxs populates p.filteredIdxs with indices of rows matching p.filter.
 func (p *FileListPane) buildFilteredIdxs() {
 	p.filteredIdxs = nil
