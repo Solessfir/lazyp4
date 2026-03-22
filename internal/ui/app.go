@@ -228,9 +228,10 @@ type openFileDoneMsg struct {
 }
 
 type moveDoneMsg struct {
-	count int
-	clID  string
-	err   error
+	count   int
+	clID    string
+	err     error
+	userErr bool // true when the error is a user input problem (no p4 command was run)
 }
 
 type syncToCLDoneMsg struct {
@@ -874,8 +875,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case moveDoneMsg:
 		if m.err != nil {
-			a.status = "move failed: " + m.err.Error()
-			a.cmdLog.Add("p4 reopen", "error: "+m.err.Error())
+			a.status = m.err.Error()
+			if m.userErr {
+				a.cmdLog.Add("move CL", "error: "+m.err.Error())
+			} else {
+				a.cmdLog.Add("p4 reopen", "error: "+m.err.Error())
+			}
 		} else {
 			dest := m.clID
 			if dest == "default" {
@@ -1240,7 +1245,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 			ti := textinput.New()
-			ti.Placeholder = "CL name (empty = default)..."
+			ti.Placeholder = "Existing CL number, new CL name, or empty for default"
 			ti.Width = 40
 			ti.Focus()
 			a.moveModal = &moveCLModal{input: ti, files: files}
@@ -2407,13 +2412,42 @@ func (a *App) cmdResolveList(path string) tea.Cmd {
 }
 
 func (a *App) cmdRevert(clientFiles []string) tea.Cmd {
+	sourceCLs := a.sourceCLsForClientFiles(clientFiles)
 	return func() tea.Msg {
 		_, err := a.client.RevertFiles(clientFiles)
 		if err != nil {
 			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
 		}
+		for _, cl := range sourceCLs {
+			_ = a.client.DeleteChange(cl)
+		}
 		return revertDoneMsg{files: clientFiles}
 	}
+}
+
+// sourceCLsForClientFiles returns unique non-default CL IDs that contain any of the given client paths.
+func (a *App) sourceCLsForClientFiles(clientFiles []string) []string {
+	fileSet := make(map[string]bool, len(clientFiles))
+	for _, f := range clientFiles {
+		fileSet[f] = true
+	}
+	seen := make(map[string]bool)
+	var cls []string
+	for _, cl := range a.fileList.Changelists() {
+		if cl.ID == "default" {
+			continue
+		}
+		for _, f := range cl.Files {
+			if fileSet[f.ClientFile] {
+				if !seen[cl.ID] {
+					seen[cl.ID] = true
+					cls = append(cls, cl.ID)
+				}
+				break
+			}
+		}
+	}
+	return cls
 }
 
 type revertDoneMsg struct {
@@ -2657,6 +2691,7 @@ func (a *App) execMoveToCL() tea.Cmd {
 	for i, f := range files {
 		clientFiles[i] = f.ClientFile
 	}
+	sourceCLs := uniqueNonDefaultCLs(files)
 	return func() tea.Msg {
 		clID := "default"
 		if name != "" {
@@ -2677,10 +2712,29 @@ func (a *App) execMoveToCL() tea.Cmd {
 			}
 		}
 		if _, err := a.client.ReopenFiles(clID, clientFiles); err != nil {
+			if strings.Contains(err.Error(), "unknown") && isNumeric(clID) {
+				return moveDoneMsg{err: fmt.Errorf("CL %s does not exist — a number-only input is treated as a CL ID, not a name", clID), userErr: true}
+			}
 			return moveDoneMsg{err: err}
+		}
+		for _, cl := range sourceCLs {
+			_ = a.client.DeleteChange(cl)
 		}
 		return moveDoneMsg{count: len(files), clID: clID}
 	}
+}
+
+// uniqueNonDefaultCLs returns deduplicated non-default CL IDs from a slice of opened files.
+func uniqueNonDefaultCLs(files []p4.OpenedFile) []string {
+	seen := make(map[string]bool)
+	var cls []string
+	for _, f := range files {
+		if f.Change != "default" && !seen[f.Change] {
+			seen[f.Change] = true
+			cls = append(cls, f.Change)
+		}
+	}
+	return cls
 }
 
 func (a *App) renderMoveModal() string {
@@ -2688,7 +2742,7 @@ func (a *App) renderMoveModal() string {
 		"\n\n" +
 		a.moveModal.input.View() +
 		"\n\n" +
-		styleModalHint.Render("number = move to that CL, text = find/create by name, empty = default   enter - confirm   esc - cancel")
+		styleModalHint.Render("enter - confirm   esc - cancel")
 	return styleModalBox.Render(content)
 }
 
