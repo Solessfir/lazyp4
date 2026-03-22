@@ -5,6 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/solessfir/lazyp4/internal/p4"
 )
 
 // BrowserOpenFileMsg is emitted when the user presses Enter on a file node.
@@ -33,12 +35,16 @@ type BrowserNeedsSearchMsg struct {
 }
 
 type browserNode struct {
-	name     string
-	path     string
-	isDir    bool
-	loaded   bool
-	expanded bool
-	children []*browserNode
+	name           string
+	path           string // depot path
+	localPath      string // absolute local path (workspace mode only)
+	isDir          bool
+	tracked        bool // synced via p4 have (workspace mode only; always true in depot mode)
+	loaded         bool
+	expanded       bool
+	children       []*browserNode
+	openedByMe     bool
+	openedByOthers bool
 }
 
 type browserRow struct {
@@ -47,10 +53,14 @@ type browserRow struct {
 }
 
 var (
-	styleBrowserDir      = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true) // cyan
-	styleBrowserWsFile   = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))            // white (workspace)
-	styleBrowserDepotFile = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))           // blue (depot)
-	styleBrowserLoading  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleBrowserDir       = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true) // cyan
+	styleBrowserWsFile    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))            // white (workspace)
+	styleBrowserDepotFile = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))            // blue (depot)
+	styleBrowserLoading   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleOpenMe           = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // green — opened by you
+	styleOpenOther        = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))  // blue — opened by others
+	styleOpenBoth         = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))  // yellow — opened by both
+	styleBrowserUntracked = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))  // gray — local only, not in depot
 )
 
 // BrowserPane is a lazy-loading tree browser for workspace or depot files.
@@ -300,8 +310,80 @@ func (p *BrowserPane) SelectedPath() string {
 	return n.path
 }
 
+// BrowserSelection holds information about the currently selected browser node.
+type BrowserSelection struct {
+	DepotPath string
+	LocalPath string
+	IsDir     bool
+	Tracked   bool // always true in depot mode
+}
+
+// SelectedEntry returns info about the currently selected node, or nil if nothing selected.
+func (p *BrowserPane) SelectedEntry() *BrowserSelection {
+	rows := p.filteredRows()
+	cur := p.cursor
+	if p.filter != "" {
+		cur = p.filterCursor
+	}
+	if len(rows) == 0 || cur >= len(rows) {
+		return nil
+	}
+	n := rows[cur].node
+	depotPath := n.path
+	if n.isDir {
+		depotPath = n.path + "/..."
+	}
+	return &BrowserSelection{
+		DepotPath: depotPath,
+		LocalPath: n.localPath,
+		IsDir:     n.isDir,
+		Tracked:   n.tracked,
+	}
+}
+
+// LoadedDirPaths returns the depot paths of all currently loaded (expanded or collapsed) directories.
+// Used to reload browser content on refresh.
+func (p *BrowserPane) LoadedDirPaths() []string {
+	var paths []string
+	p.collectLoadedDirs(p.root, &paths)
+	return paths
+}
+
+func (p *BrowserPane) collectLoadedDirs(node *browserNode, out *[]string) {
+	if node == nil {
+		return
+	}
+	if node.isDir && node.loaded {
+		*out = append(*out, node.path)
+		for _, c := range node.children {
+			p.collectLoadedDirs(c, out)
+		}
+	}
+}
+
+// RefreshYoursOpen walks all loaded file nodes and updates openedByMe from the given set.
+// Call this whenever the user's own open files change (e.g. after revert or p4 edit).
+func (p *BrowserPane) RefreshYoursOpen(yours map[string]bool) {
+	p.refreshYoursNode(p.root, yours)
+}
+
+func (p *BrowserPane) refreshYoursNode(node *browserNode, yours map[string]bool) {
+	if node == nil {
+		return
+	}
+	if !node.isDir {
+		node.openedByMe = yours[node.path]
+	}
+	for _, c := range node.children {
+		p.refreshYoursNode(c, yours)
+	}
+}
+
 // LoadChildren populates a node's children after an async load.
-func (p *BrowserPane) LoadChildren(parentPath string, dirs, files []string) {
+// yoursOpen and othersOpen are sets of depot paths; nil means no data available.
+// wsEntries is used for workspace mode (includes untracked files); pass nil for depot mode.
+// files is used for depot mode when wsEntries is nil.
+func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []string, wsEntries []p4.WorkspaceEntry, yoursOpen, othersOpen map[string]bool) {
 	node := p.findNode(p.root, parentPath)
 	if node == nil {
 		return
@@ -314,12 +396,37 @@ func (p *BrowserPane) LoadChildren(parentPath string, dirs, files []string) {
 		}
 		node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
 	}
-	for _, f := range files {
-		name := f
-		if idx := strings.LastIndex(f, "/"); idx >= 0 && idx < len(f)-1 {
-			name = f[idx+1:]
+	if wsEntries != nil {
+		for _, e := range wsEntries {
+			name := e.DepotPath
+			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
+				name = e.DepotPath[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{
+				name:           name,
+				path:           e.DepotPath,
+				localPath:      e.LocalPath,
+				isDir:          false,
+				tracked:        e.Tracked,
+				openedByMe:     yoursOpen[e.DepotPath],
+				openedByOthers: othersOpen[e.DepotPath],
+			})
 		}
-		node.children = append(node.children, &browserNode{name: name, path: f, isDir: false})
+	} else {
+		for _, f := range files {
+			name := f
+			if idx := strings.LastIndex(f, "/"); idx >= 0 && idx < len(f)-1 {
+				name = f[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{
+				name:           name,
+				path:           f,
+				isDir:          false,
+				tracked:        true,
+				openedByMe:     yoursOpen[f],
+				openedByOthers: othersOpen[f],
+			})
+		}
 	}
 	node.loaded = true
 	node.expanded = true
@@ -520,9 +627,11 @@ func (p *BrowserPane) renderLines(innerW, innerH int) string {
 	}
 	for i := p.scrollOff; i < end; i++ {
 		row := rows[i]
-		line := p.renderRow(row, innerW)
+		var line string
 		if i == cur && p.focused {
-			line = styleCursor.Width(innerW).Render(line)
+			line = styleCursor.Width(innerW).Render(p.renderRowPlain(row))
+		} else {
+			line = p.renderRow(row, innerW)
 		}
 		sb.WriteString(line)
 		if i < end-1 {
@@ -550,8 +659,50 @@ func (p *BrowserPane) renderRow(row browserRow, maxW int) string {
 		}
 		return styleBrowserDir.Render(indent + icon + row.node.name)
 	}
-	if p.mode == BrowserModeDepot {
-		return styleBrowserDepotFile.Render(indent + "  " + row.node.name)
+	var indicator string
+	switch {
+	case row.node.openedByMe && row.node.openedByOthers:
+		indicator = styleOpenBoth.Render("◐") + " "
+	case row.node.openedByMe:
+		indicator = styleOpenMe.Render("●") + " "
+	case row.node.openedByOthers:
+		indicator = styleOpenOther.Render("●") + " "
+	default:
+		indicator = "  "
 	}
-	return styleBrowserWsFile.Render(indent + "  " + row.node.name)
+	var fileStyle lipgloss.Style
+	switch {
+	case p.mode == BrowserModeDepot:
+		fileStyle = styleBrowserDepotFile
+	case !row.node.tracked:
+		fileStyle = styleBrowserUntracked
+	default:
+		fileStyle = styleBrowserWsFile
+	}
+	return indent + indicator + fileStyle.Render(row.node.name)
+}
+
+// renderRowPlain renders a row as plain text with no ANSI color codes, for use as
+// cursor row content (cursor background style is applied by the caller).
+func (p *BrowserPane) renderRowPlain(row browserRow) string {
+	indent := strings.Repeat("  ", row.depth)
+	if row.node.isDir {
+		icon := "▶ "
+		if row.node.expanded {
+			icon = "▼ "
+		}
+		return indent + icon + row.node.name
+	}
+	var indicator string
+	switch {
+	case row.node.openedByMe && row.node.openedByOthers:
+		indicator = "◐ "
+	case row.node.openedByMe:
+		indicator = "● "
+	case row.node.openedByOthers:
+		indicator = "● "
+	default:
+		indicator = "  "
+	}
+	return indent + indicator + row.node.name
 }

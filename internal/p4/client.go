@@ -754,6 +754,150 @@ func (c *Client) BrowserDepotFiles(wildcard string) ([]string, error) {
 	return files, nil
 }
 
+// WorkspaceEntry represents a file visible in the local workspace (tracked or untracked).
+type WorkspaceEntry struct {
+	DepotPath string // depot path (computed for untracked files)
+	LocalPath string // absolute local path
+	Tracked   bool   // true if synced via p4 have
+}
+
+// BrowserWorkspaceEntries lists all entries visible under a depot directory in the workspace,
+// combining p4 have (tracked) with a local filesystem scan (untracked).
+// depotPath is the depot directory path (e.g. "//depot/stream/src").
+func (c *Client) BrowserWorkspaceEntries(depotPath string) (dirs []string, files []WorkspaceEntry, err error) {
+	if c.Root == "" || c.Stream == "" {
+		return nil, nil, nil
+	}
+
+	// Compute local directory path from depot path.
+	rel := strings.TrimPrefix(depotPath, c.Stream)
+	localDir := c.Root + rel
+
+	// List local filesystem entries.
+	entries, fsErr := os.ReadDir(localDir)
+	if fsErr != nil {
+		// Directory doesn't exist locally yet — fall back to p4 have only.
+		haveFiles, haveErr := c.BrowserHaveFiles(depotPath + "/*")
+		return nil, toTrackedEntries(haveFiles, depotPath, c.Stream, c.Root), haveErr
+	}
+
+	// Get synced files for tracking status.
+	haveFiles, _ := c.BrowserHaveFiles(depotPath + "/*")
+	haveSet := map[string]bool{}
+	for _, f := range haveFiles {
+		haveSet[f] = true
+	}
+
+	// Get depot dirs (may include dirs with no local presence).
+	depotDirs, _ := c.BrowserDirs(depotPath + "/*")
+	depotDirSet := map[string]bool{}
+	for _, d := range depotDirs {
+		depotDirSet[d] = true
+		dirs = append(dirs, d)
+	}
+
+	for _, e := range entries {
+		// Skip hidden files and p4 metadata.
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		localPath := localDir + "/" + e.Name()
+		computedDepot := c.Stream + rel + "/" + e.Name()
+		if e.IsDir() {
+			if !depotDirSet[computedDepot] {
+				dirs = append(dirs, computedDepot)
+			}
+		} else {
+			files = append(files, WorkspaceEntry{
+				DepotPath: computedDepot,
+				LocalPath: localPath,
+				Tracked:   haveSet[computedDepot],
+			})
+		}
+	}
+
+	// Add tracked files not found locally (e.g. deleted on disk).
+	localNames := map[string]bool{}
+	for _, e := range entries {
+		localNames[e.Name()] = true
+	}
+	for _, f := range haveFiles {
+		name := f[strings.LastIndex(f, "/")+1:]
+		if !localNames[name] {
+			localPath := localDir + "/" + name
+			files = append(files, WorkspaceEntry{DepotPath: f, LocalPath: localPath, Tracked: true})
+		}
+	}
+
+	return dirs, files, nil
+}
+
+func toTrackedEntries(depotPaths []string, depotDir, stream, root string) []WorkspaceEntry {
+	rel := strings.TrimPrefix(depotDir, stream)
+	localDir := root + rel
+	var out []WorkspaceEntry
+	for _, dp := range depotPaths {
+		name := dp[strings.LastIndex(dp, "/")+1:]
+		out = append(out, WorkspaceEntry{DepotPath: dp, LocalPath: localDir + "/" + name, Tracked: true})
+	}
+	return out
+}
+
+// AddFile opens a local file for add in the default changelist.
+func (c *Client) AddFile(localPath string) error {
+	_, err := c.run("add", localPath)
+	return err
+}
+
+// OpenedByOthers returns the set of depot paths opened by users other than the current user
+// at the given wildcard (e.g. "//depot/stream/*"). Uses p4 opened -a which is reliable
+// regardless of client view mapping.
+func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
+	out, err := c.run("opened", "-a", wildcard)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "no such file") || strings.Contains(msg, "no files") ||
+			strings.Contains(msg, "not opened") || strings.Contains(msg, "not open") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	result := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// //depot/stream/file.txt#1 - edit default change (text) by user@workspace
+		depotPath := line
+		if idx := strings.Index(line, "#"); idx > 0 {
+			depotPath = line[:idx]
+		}
+		if c.User == "" || !strings.Contains(line, " by "+c.User+"@") {
+			result[depotPath] = true
+		}
+	}
+	return result, nil
+}
+
+// EditFile opens a depot file for edit in the default changelist.
+func (c *Client) EditFile(depotPath string) error {
+	_, err := c.run("edit", depotPath)
+	return err
+}
+
+// SyncFile syncs a single file to the latest revision.
+func (c *Client) SyncFile(depotPath string) error {
+	_, err := c.run("sync", depotPath)
+	return err
+}
+
+// DeletePath marks a file or path (e.g. "//depot/stream/dir/...") for delete.
+func (c *Client) DeletePath(path string) error {
+	_, err := c.run("delete", path)
+	return err
+}
+
 // SyncDryRun runs p4 sync -n and returns the number of files that would be updated.
 func (c *Client) SyncDryRun() (int, error) {
 	out, err := c.run("sync", "-n")

@@ -106,7 +106,9 @@ type logDoneMsg struct {
 type browserLoadedMsg struct {
 	parentPath string
 	dirs       []string
-	files      []string
+	files      []string                // depot mode only
+	wsEntries  []p4.WorkspaceEntry     // workspace mode only
+	othersOpen map[string]bool
 }
 
 type browserSearchDoneMsg struct {
@@ -429,6 +431,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.setOffline(false)
 			a.fileList.SetChangelists(m.cls)
+			yoursOpen := map[string]bool{}
+			for _, cl := range m.cls {
+				for _, f := range cl.Files {
+					yoursOpen[f.DepotFile] = true
+				}
+			}
+			a.browserPane.RefreshYoursOpen(yoursOpen)
 			a.status = fmt.Sprintf("Loaded %d changelists", len(m.cls))
 			a.cmdLog.Add("p4 opened", fmt.Sprintf("%d changelists", len(m.cls)))
 			a.relayout() // pending height changes
@@ -674,7 +683,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdBrowserLoad(m.Path, m.Mode)
 
 	case browserLoadedMsg:
-		a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files)
+		yoursOpen := map[string]bool{}
+		for _, cl := range a.fileList.Changelists() {
+			for _, f := range cl.Files {
+				yoursOpen[f.DepotFile] = true
+			}
+		}
+		a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, m.wsEntries, yoursOpen, m.othersOpen)
 		a.relayout()
 		if a.browserNavTarget != "" {
 			if a.browserPane.NavigateTo(a.browserNavTarget) {
@@ -713,6 +728,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = "Reconcile complete: " + m.path
 			a.cmdLog.Add("p4 reconcile "+m.path, "done")
+		}
+		return a, a.refresh()
+
+	case browserDeleteDoneMsg:
+		if m.err != nil {
+			a.status = "delete failed - see log"
+			a.cmdLog.Add("p4 delete "+m.path, "error: "+m.err.Error())
+		} else {
+			a.status = "marked for delete: " + m.path
+			a.cmdLog.Add("p4 delete "+m.path, "done")
 		}
 		return a, a.refresh()
 
@@ -873,7 +898,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Block server-dependent operations when offline.
 	if a.offlineMode {
 		switch m.String() {
-		case "S", "s", "e", "E", "d", "u", "o", "F", "f", "m", "R":
+		case "S", "s", "e", "E", "d", "u", "D", "F", "f", "m", "R":
 			a.status = "Offline — p4 server unreachable"
 			return a, nil
 		}
@@ -887,7 +912,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "r":
 		a.status = "Refreshing..."
-		return a, a.refresh()
+		cmds := []tea.Cmd{a.refresh()}
+		for _, path := range a.browserPane.LoadedDirPaths() {
+			cmds = append(cmds, a.cmdBrowserLoad(path, a.browserPane.Mode()))
+		}
+		return a, tea.Batch(cmds...)
 	case "t":
 		a.fileList.ToggleMode()
 		return a, nil
@@ -1048,6 +1077,19 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.cmdResolveList(resolvePath)
 	case "e", "E":
+		if a.active == paneBrowser && m.String() == "e" {
+			path := a.browserPane.SelectedPath()
+			if path == "" {
+				if root := a.browserPane.RootPath(); root != "" {
+					path = root + "/..."
+				}
+			}
+			if path != "" {
+				a.status = "Reconciling " + path + "..."
+				return a, a.cmdReconcile(path)
+			}
+			return a, nil
+		}
 		if a.active == paneFileList {
 			noRevert := m.String() == "E"
 			if files := a.filesToShelve(); len(files) > 0 {
@@ -1061,22 +1103,19 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		return a, nil
-	case "o":
-		path := ""
+	case "D":
 		if a.active == paneBrowser {
-			path = a.browserPane.SelectedPath()
-		}
-		if path == "" {
-			if root := a.browserPane.RootPath(); root != "" {
-				path = root + "/..."
+			path := a.browserPane.SelectedPath()
+			if path == "" {
+				if root := a.browserPane.RootPath(); root != "" {
+					path = root + "/..."
+				}
+			}
+			if path != "" {
+				return a, a.cmdBrowserDelete(path)
 			}
 		}
-		if path == "" {
-			a.status = "No path available for reconcile"
-			return a, nil
-		}
-		a.status = "Reconciling " + path + "..."
-		return a, a.cmdReconcile(path)
+		return a, nil
 	case "m":
 		if a.active == paneFileList {
 			files := a.filesToMove()
@@ -1785,8 +1824,9 @@ func (a *App) helpContent() string {
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
+			{k: "e", desc: "Reconcile file or folder (edit / add / delete)"},
+			{k: "D", desc: "Mark for delete"},
 			{k: "F", desc: "Force sync selected file or folder"},
-			{k: "o", desc: "Reconcile offline work"},
 		}
 	case paneFileList:
 		local = []row{
@@ -2022,16 +2062,17 @@ func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 	return func() tea.Msg {
 		wildcard := path + "/*"
-		dirs, _ := a.client.BrowserDirs(wildcard)
-		var files []string
+		othersOpen, _ := a.client.OpenedByOthers(wildcard)
 		if mode == panes.BrowserModeWorkspace {
-			files, _ = a.client.BrowserHaveFiles(wildcard)
-		} else {
-			files, _ = a.client.BrowserDepotFiles(wildcard)
+			dirs, wsEntries, _ := a.client.BrowserWorkspaceEntries(path)
+			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen}
 		}
-		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files}
+		dirs, _ := a.client.BrowserDirs(wildcard)
+		files, _ := a.client.BrowserDepotFiles(wildcard)
+		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen}
 	}
 }
+
 
 func (a *App) cmdResolveList(path string) tea.Cmd {
 	return func() tea.Msg {
@@ -2078,6 +2119,18 @@ func (a *App) cmdReconcile(path string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := a.client.Reconcile(path)
 		return reconcileDoneMsg{path: path, err: err}
+	}
+}
+
+type browserDeleteDoneMsg struct {
+	path string
+	err  error
+}
+
+func (a *App) cmdBrowserDelete(path string) tea.Cmd {
+	return func() tea.Msg {
+		err := a.client.DeletePath(path)
+		return browserDeleteDoneMsg{path: path, err: err}
 	}
 }
 
