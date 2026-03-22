@@ -1031,6 +1031,10 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.status = "Fetching..."
 		return a, a.cmdFetch()
 	case "b":
+		// Remember selected file so we can navigate to it in the new mode.
+		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
+			a.browserNavTarget = sel.DepotPath
+		}
 		a.browserPane.ToggleMode()
 		if path := a.browserPane.RootPath(); path != "" {
 			return a, tea.Batch(
@@ -1261,7 +1265,12 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.active {
 	case paneBrowser:
 		cmd = a.browserPane.Update(m)
-		if a.historyMode {
+		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
+			if a.historyMode {
+				return a, tea.Batch(cmd, a.cmdFilelog(sel.DepotPath))
+			}
+			return a, tea.Batch(cmd, a.cmdDiff(sel.DepotPath))
+		} else if a.historyMode {
 			if path := a.browserPane.SelectedPath(); path != "" {
 				max := 0
 				if strings.HasSuffix(path, "/...") {
@@ -1281,10 +1290,8 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd = a.fileList.Update(m)
 		if a.historyMode {
 			var histCmd tea.Cmd
-			if f := a.fileList.SelectedFile(); f != nil {
-				histCmd = a.cmdFilelog(f.DepotFile)
-			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
-				histCmd = a.cmdFilelogMax(dp, 100)
+			if hp := a.fileList.SelectedHistoryPath(); hp != "" {
+				histCmd = a.cmdFilelog(hp)
 			}
 			if histCmd != nil {
 				if f := a.fileList.SelectedFile(); f != nil {
@@ -1576,13 +1583,31 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 			a.updateFocus()
 			if contentY := y - browserTop - 1; contentY >= 0 {
 				a.browserPane.SetCursor(a.browserPane.ScrollOffset() + contentY)
+				if sel := a.browserPane.SelectedEntry(); sel != nil {
+					if sel.IsDir {
+						if a.historyMode {
+							return a, a.cmdFilelogMax(sel.DepotPath, 100)
+						}
+					} else {
+						if a.historyMode {
+							return a, a.cmdFilelog(sel.DepotPath)
+						}
+						return a, a.cmdDiff(sel.DepotPath)
+					}
+				}
 			}
 		case a.showStreams && y >= streamsTop && y < streamsBottom:
 			a.active = paneStreams
 			a.updateFocus()
+			if contentY := y - streamsTop - 1; contentY >= 0 {
+				a.streamsPane.SetCursor(contentY)
+			}
 		case y >= shelvedTop:
 			a.active = paneShelved
 			a.updateFocus()
+			if contentY := y - shelvedTop - 1; contentY >= 0 {
+				a.shelvedPane.SetCursor(a.shelvedPane.ScrollOffset() + contentY)
+			}
 		}
 	} else {
 		// right side: top = pending, bottom = diff/log/resolve
@@ -1599,12 +1624,24 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 				rowIdx := a.fileList.ScrollOffset() + contentY
 				a.fileList.SetCursor(rowIdx)
 				if f := a.fileList.SelectedFile(); f != nil {
+					if a.historyMode {
+						return a, a.cmdFilelog(f.DepotFile)
+					}
 					return a, a.cmdDiff(f.ClientFile)
+				} else if a.historyMode {
+					if hp := a.fileList.SelectedHistoryPath(); hp != "" {
+						return a, a.cmdFilelog(hp)
+					}
 				}
 			}
 		} else {
 			a.active = a.currentRightPane()
 			a.updateFocus()
+			if a.historyMode {
+				if contentY := y - pendingH - 1; contentY >= 0 {
+					a.log.SetCursorByLine(contentY)
+				}
+			}
 		}
 	}
 
@@ -2296,11 +2333,8 @@ func (a *App) cmdDiff(clientFile string) tea.Cmd {
 // used when switching panes in history mode.
 func (a *App) cmdFilelogForSelection() tea.Cmd {
 	if a.active == paneFileList {
-		if f := a.fileList.SelectedFile(); f != nil {
-			return a.cmdFilelog(f.DepotFile)
-		}
-		if dp := a.fileList.SelectedDepotPath(); dp != "" {
-			return a.cmdFilelogMax(dp, 100)
+		if hp := a.fileList.SelectedHistoryPath(); hp != "" {
+			return a.cmdFilelog(hp)
 		}
 	}
 	if a.active == paneBrowser {

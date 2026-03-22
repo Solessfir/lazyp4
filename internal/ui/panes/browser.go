@@ -65,9 +65,9 @@ var (
 
 // BrowserPane is a lazy-loading tree browser for workspace or depot files.
 type BrowserPane struct {
-	mode         BrowserMode
-	root         *browserNode
-	rows         []browserRow
+	mode  BrowserMode
+	root  *browserNode
+	rows  []browserRow
 	cursor       int
 	focused      bool
 	width        int
@@ -95,7 +95,7 @@ func (p *BrowserPane) SetRoot(path string) {
 	p.rebuild()
 }
 
-// RootPath returns the depot path of the root node.
+// RootPath returns the depot path of the root node (or the stored path if tree not yet loaded).
 func (p *BrowserPane) RootPath() string {
 	if p.root == nil {
 		return ""
@@ -118,11 +118,12 @@ func (p *BrowserPane) ToggleMode() {
 	} else {
 		p.mode = BrowserModeWorkspace
 	}
+	// Reset tree — app will call cmdBrowserLoad + navigate to selected file.
 	if p.root != nil {
-		p.root.loaded = false
-		p.root.expanded = false
-		p.root.children = nil
+		rootPath := p.root.path
+		p.root = &browserNode{name: p.root.name, path: rootPath, isDir: true}
 	}
+
 	p.cursor = 0
 	p.scrollOff = 0
 	p.searchIndex = nil

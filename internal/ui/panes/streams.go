@@ -79,6 +79,19 @@ func (p *StreamsPane) SelectedStream() string {
 	return ""
 }
 
+// SetCursor moves the cursor to idx, clamped to valid range.
+func (p *StreamsPane) SetCursor(idx int) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(p.visiblePaths) {
+		idx = len(p.visiblePaths) - 1
+	}
+	if idx >= 0 {
+		p.cursor = idx
+	}
+}
+
 // Update handles j/k navigation.
 func (p *StreamsPane) Update(msg tea.Msg) tea.Cmd {
 	if key, ok := msg.(tea.KeyMsg); ok {

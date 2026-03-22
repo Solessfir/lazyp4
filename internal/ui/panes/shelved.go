@@ -96,6 +96,23 @@ func (p *ShelvedPane) PreferredHeight() int {
 	return h
 }
 
+// ScrollOffset returns the index of the first visible row.
+func (p *ShelvedPane) ScrollOffset() int { return p.scroll }
+
+// SetCursor moves the cursor to idx, clamped to valid range.
+func (p *ShelvedPane) SetCursor(idx int) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(p.rows) {
+		idx = len(p.rows) - 1
+	}
+	if idx >= 0 {
+		p.cursor = idx
+		p.clampScroll()
+	}
+}
+
 // SelectedCL returns the CL ID under the cursor, or "".
 func (p *ShelvedPane) SelectedCL() string {
 	if len(p.rows) == 0 || p.cursor >= len(p.rows) {

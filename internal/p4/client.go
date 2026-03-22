@@ -172,16 +172,19 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 // Diff returns the unified diff output for a single file.
 // Returns a human-readable message for binary files instead of raw bytes.
 func (c *Client) Diff(clientFile string) (string, error) {
-	out, err := c.run("diff", "-du", clientFile)
+	out, err := c.run("diff", "-du", "-f", clientFile)
 	if err != nil {
 		// p4 diff exits non-zero for binary files - surface a clean message.
 		if strings.Contains(err.Error(), "binary") || strings.Contains(out, "(binary)") {
-			return "(binary file - diff not available)", nil
+			return "(binary file — diff not available)", nil
 		}
 		return "", err
 	}
 	if strings.Contains(out, "(binary)") {
-		return "(binary file - diff not available)", nil
+		return "(binary file — diff not available)", nil
+	}
+	if strings.TrimSpace(out) == "" {
+		return "(files are identical)", nil
 	}
 	return out, nil
 }
@@ -433,7 +436,7 @@ func (c *Client) CurrentCL() string {
 // Changes returns submitted changelists that affected the given depot path.
 // Use for directories/stream wildcards (path ending in /...) to avoid duplicate entries per file.
 func (c *Client) Changes(path string, max int) ([]FilelogEntry, error) {
-	args := []string{"changes", "-l", "-s", "submitted"}
+	args := []string{"changes", "-l", "-t", "-s", "submitted"}
 	if max > 0 {
 		args = append(args, "-m", strconv.Itoa(max))
 	}
@@ -460,12 +463,21 @@ func (c *Client) Changes(path string, max int) ([]FilelogEntry, error) {
 				continue
 			}
 			cl := parts[1]
+			// With -t: "Change N on YYYY/MM/DD HH:MM:SS by user@client"
+			// Without -t: "Change N on YYYY/MM/DD by user@client"
 			date := parts[3]
-			if ts, err2 := time.Parse("2006/01/02", date); err2 == nil {
-				date = ts.Format("2006-01-02")
+			userIdx := 5
+			if len(parts) > 6 && strings.Contains(parts[4], ":") {
+				// has time component
+				if ts, err2 := time.Parse("2006/01/02 15:04:05", date+" "+parts[4]); err2 == nil {
+					date = ts.Format("02 Jan 2006 15:04")
+				}
+				userIdx = 6
+			} else if ts, err2 := time.Parse("2006/01/02", date); err2 == nil {
+				date = ts.Format("02 Jan 2006")
 			}
 			// user@client
-			userClient := parts[5]
+			userClient := parts[userIdx]
 			user, client := userClient, ""
 			if idx := strings.Index(userClient, "@"); idx >= 0 {
 				user = userClient[:idx]
@@ -511,7 +523,7 @@ func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
 		rev, _ := strconv.Atoi(r["rev0"])
 		date := r["time0"]
 		if ts, err := strconv.ParseInt(date, 10, 64); err == nil {
-			date = time.Unix(ts, 0).Format("2006-01-02 15:04")
+			date = time.Unix(ts, 0).Format("02 Jan 2006 15:04")
 		}
 		entries = append(entries, FilelogEntry{
 			DepotFile:   r["depotFile"],

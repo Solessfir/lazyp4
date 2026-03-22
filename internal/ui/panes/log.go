@@ -26,8 +26,9 @@ type LogPane struct {
 }
 
 var (
-	styleLogCL   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleLogMeta = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleLogCL     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleLogCLNum  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	styleLogMeta   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	styleLogDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 )
 
@@ -63,6 +64,26 @@ func (p *LogPane) SetSize(w, h int) {
 func (p *LogPane) SetFocused(f bool) {
 	p.focused = f
 	p.rerender()
+}
+
+// ScrollOffset returns the viewport's top line offset.
+func (p *LogPane) ScrollOffset() int { return p.viewport.YOffset }
+
+// SetCursorByLine moves the cursor to the entry that contains the given viewport line.
+func (p *LogPane) SetCursorByLine(line int) {
+	absLine := p.viewport.YOffset + line
+	// Find the last entry whose offset is <= absLine.
+	idx := 0
+	for i, off := range p.entryOffsets {
+		if off <= absLine {
+			idx = i
+		}
+	}
+	if idx != p.cursor {
+		p.cursor = idx
+		p.rerender()
+		p.scrollToCursor()
+	}
 }
 
 // SelectedChange returns the CL number of the currently selected entry, or "".
@@ -171,21 +192,25 @@ func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool)
 	line := 0
 	for i, e := range entries {
 		offsets[i] = line
-		header := fmt.Sprintf("CL %s  %s", e.Change, e.Date)
-		if i == cursor && focused {
-			sb.WriteString(styleCursor.Render(header))
-		} else {
-			sb.WriteString(styleLogCL.Render(header))
+		var suffix string
+		// Split "22 Mar 2026 15:04" into date and optional time parts.
+		datePart, timePart := e.Date, ""
+		if idx := strings.LastIndex(e.Date, " "); idx >= 0 && len(e.Date)-idx == 6 {
+			datePart = e.Date[:idx]
+			timePart = e.Date[idx+1:]
 		}
-		sb.WriteByte('\n')
-		line++
-		var meta string
 		if e.Action != "" {
-			meta = fmt.Sprintf("  %s  %s", e.Action, e.Client)
+			suffix = fmt.Sprintf("  %s  %s  %s  %s", e.Client, timePart, datePart, e.Action)
+		} else if timePart != "" {
+			suffix = fmt.Sprintf("  %s  %s  %s", e.Client, timePart, datePart)
 		} else {
-			meta = fmt.Sprintf("  %s", e.Client)
+			suffix = fmt.Sprintf("  %s  %s", e.Client, datePart)
 		}
-		sb.WriteString(styleLogMeta.Render(meta))
+		if i == cursor && focused {
+			sb.WriteString(styleCursor.Render("CL " + e.Change + suffix))
+		} else {
+			sb.WriteString(styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix))
+		}
 		sb.WriteByte('\n')
 		line++
 		desc := strings.TrimSpace(e.Description)

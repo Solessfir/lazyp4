@@ -391,6 +391,55 @@ func (p *FileListPane) SelectedDepotPath() string {
 	return ""
 }
 
+// SelectedHistoryPath returns the best depot path for loading filelog history:
+// - file row: exact depot file path (→ Filelog, shows action)
+// - dir row: first file under that directory (→ Filelog, shows action)
+// - header row: first file in the CL (→ Filelog, shows action)
+// Returns "" if nothing is selected.
+func (p *FileListPane) SelectedHistoryPath() string {
+	if len(p.rows) == 0 {
+		return ""
+	}
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return ""
+	}
+	r := p.rows[cur]
+	switch r.kind {
+	case rowKindFile:
+		return p.changelists[r.clIndex].Files[r.fileIndex].DepotFile
+	case rowKindDir:
+		cl := p.changelists[r.clIndex]
+		colonIdx := strings.Index(r.dirKey, ":")
+		if colonIdx == -1 {
+			return ""
+		}
+		relDir := r.dirKey[colonIdx+1:] + "/"
+		for _, f := range cl.Files {
+			trimmed := strings.TrimPrefix(f.DepotFile, "//")
+			idx := strings.Index(trimmed, "/")
+			if idx == -1 {
+				continue
+			}
+			depotBase := "//" + trimmed[:idx+1]
+			rel := trimmed[idx+1:]
+			if strings.HasPrefix(rel, relDir) {
+				return depotBase + rel
+			}
+		}
+		// fallback: first file in CL
+		if len(cl.Files) > 0 {
+			return cl.Files[0].DepotFile
+		}
+	case rowKindHeader:
+		cl := p.changelists[r.clIndex]
+		if len(cl.Files) > 0 {
+			return cl.Files[0].DepotFile
+		}
+	}
+	return ""
+}
+
 // FilesForCL returns all opened files belonging to the given CL ID.
 func (p *FileListPane) FilesForCL(clID string) []p4.OpenedFile {
 	for _, cl := range p.changelists {
