@@ -3,7 +3,9 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -46,9 +48,10 @@ const (
 )
 
 type confirmModal struct {
-	kind  confirmKind
-	files []string // for revert
-	clID  string   // for delete shelf
+	kind          confirmKind
+	files         []string // client paths to revert
+	localToDelete []string // local paths to delete after revert (ActionAdd files only)
+	clID          string   // for delete shelf
 }
 
 // shelveDescModal is shown when shelving files from the default CL so the user can name the new CL.
@@ -364,10 +367,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			co := a.checkout
 			switch m.String() {
-			case "esc", "ctrl+c", "n", "N":
+			case "esc", "ctrl+c", "n", "N", "h":
 				a.checkout = nil
 				a.status = "Cancelled"
-			case "enter", "y", "Y":
+			case "enter", "y", "Y", "l":
 				if co.hasFiles && !co.shelving {
 					co.shelving = true
 					return a, a.cmdShelveForCheckout(co)
@@ -383,7 +386,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.confirm != nil {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			switch m.String() {
-			case "enter":
+			case "enter", "y", "Y", "l":
 				c := a.confirm
 				a.confirm = nil
 				switch c.kind {
@@ -392,7 +395,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case confirmKindDeleteShelf:
 					return a, a.cmdDeleteShelf(c.clID)
 				}
-			case "esc", "ctrl+c", "n", "N":
+			case "d":
+				if a.confirm != nil && len(a.confirm.localToDelete) > 0 {
+					c := a.confirm
+					a.confirm = nil
+					return a, a.cmdRevertAndDeleteLocal(c.files, c.localToDelete)
+				}
+			case "esc", "ctrl+c", "n", "N", "h":
 				a.confirm = nil
 				a.status = "Cancelled"
 			}
@@ -1016,7 +1025,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Block server-dependent operations when offline.
 	if a.offlineMode {
 		switch m.String() {
-		case "S", "s", "e", "E", "d", "u", "D", "F", "f", "m", "R":
+		case "p", "s", "e", "E", "d", "u", "D", "F", "f", "m", "R":
 			a.status = "Offline — p4 server unreachable"
 			return a, nil
 		}
@@ -1123,12 +1132,20 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for i, f := range marked {
 				files[i] = f.ClientFile
 			}
-			a.confirm = &confirmModal{kind: confirmKindRevert, files: files}
+			a.confirm = &confirmModal{
+				kind:          confirmKindRevert,
+				files:         files,
+				localToDelete: localPathsForAdds(a.client.Root, a.client.Workspace, marked),
+			}
 		} else {
 			f := a.fileList.SelectedFile()
 			if f != nil {
+				if f.Action == p4.ActionAdd {
+					local := clientToLocal(a.client.Root, a.client.Workspace, f.ClientFile)
+					a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}, localToDelete: []string{local}}
+					return a, nil
+				}
 				if f.Action != p4.ActionEdit {
-					// add/delete have no content to lose — revert directly
 					return a, a.cmdRevert([]string{f.ClientFile})
 				}
 				return a, a.cmdRevertCheck(f.ClientFile)
@@ -1140,6 +1157,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				if len(cls) == 1 {
 					f := cls[0]
+					if f.Action == p4.ActionAdd {
+						local := clientToLocal(a.client.Root, a.client.Workspace, f.ClientFile)
+						a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}, localToDelete: []string{local}}
+						return a, nil
+					}
 					if f.Action != p4.ActionEdit {
 						return a, a.cmdRevert([]string{f.ClientFile})
 					}
@@ -1149,14 +1171,18 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				for i, ff := range cls {
 					files[i] = ff.ClientFile
 				}
-				a.confirm = &confirmModal{kind: confirmKindRevert, files: files}
+				a.confirm = &confirmModal{
+					kind:          confirmKindRevert,
+					files:         files,
+					localToDelete: localPathsForAdds(a.client.Root, a.client.Workspace, cls),
+				}
 			} else {
 				a.status = "No file selected"
 				return a, nil
 			}
 		}
 		return a, nil
-	case "S":
+	case "p":
 		if a.opRunning {
 			a.status = a.opName + " already in progress"
 			return a, nil
@@ -1315,6 +1341,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				if found != nil {
+					if found.Action == p4.ActionAdd {
+						local := clientToLocal(a.client.Root, a.client.Workspace, found.ClientFile)
+						a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{found.ClientFile}, localToDelete: []string{local}}
+						return a, nil
+					}
 					if found.Action != p4.ActionEdit {
 						return a, a.cmdRevert([]string{found.ClientFile})
 					}
@@ -1613,8 +1644,6 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	bodyH := contentH - panes.CmdLogHeight
 
 	if y >= bodyH {
-		a.active = paneCmdLog
-		a.updateFocus()
 		return a, nil
 	}
 
@@ -1740,7 +1769,7 @@ func (a *App) paneOrder() []activePane {
 	if a.showStreams {
 		order = append(order, paneStreams)
 	}
-	order = append(order, paneShelved, a.currentRightPane(), paneCmdLog)
+	order = append(order, paneShelved, a.currentRightPane())
 	return order
 }
 
@@ -2006,7 +2035,7 @@ func (a *App) renderHotkeys() string {
 	global := []binding{
 		{"History", "g"},
 		{"Fetch", "f"},
-		{"Sync", "S"},
+		{"Sync", "p"},
 		{"Refresh", "r"},
 		{"?", "help"},
 	}
@@ -2152,11 +2181,15 @@ func (a *App) renderConfirmModal() string {
 			desc = styleStatus.Render(fmt.Sprintf("%d files", len(a.confirm.files)))
 		}
 	}
+	hint := "enter - confirm   esc - cancel"
+	if len(a.confirm.localToDelete) > 0 {
+		hint = "enter - revert only   d - revert + delete local   esc - cancel"
+	}
 	content := styleModalTitle.Render(title) +
 		"\n\n" +
 		desc +
 		"\n\n" +
-		styleModalHint.Render("enter - confirm   esc - cancel")
+		styleModalHint.Render(hint)
 	return styleModalBox.Render(content)
 }
 
@@ -2237,7 +2270,7 @@ func (a *App) helpContent() string {
 		{k: "1–6", desc: "Jump to pane by number"},
 		{k: "esc", desc: "Back to browser"},
 		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
-		{k: "S", desc: "Sync workspace"},
+		{k: "p", desc: "Sync workspace"},
 		{k: "r", desc: "Refresh"},
 		{k: "c", desc: "Cancel operation (sync / submit)"},
 		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
@@ -2499,6 +2532,42 @@ func (a *App) cmdRevert(clientFiles []string) tea.Cmd {
 		}
 		return revertDoneMsg{files: clientFiles}
 	}
+}
+
+func (a *App) cmdRevertAndDeleteLocal(clientFiles, localFiles []string) tea.Cmd {
+	sourceCLs := a.sourceCLsForClientFiles(clientFiles)
+	return func() tea.Msg {
+		_, err := a.client.RevertFiles(clientFiles)
+		if err != nil {
+			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
+		}
+		for _, cl := range sourceCLs {
+			_ = a.client.DeleteChange(cl)
+		}
+		for _, local := range localFiles {
+			_ = os.Remove(local)
+		}
+		return revertDoneMsg{files: clientFiles}
+	}
+}
+
+// clientToLocal converts a Perforce client path (//workspace/rel/path) to the
+// absolute local path using the workspace root.
+func clientToLocal(root, workspace, clientFile string) string {
+	prefix := "//" + workspace + "/"
+	rel := strings.TrimPrefix(clientFile, prefix)
+	return filepath.Join(root, filepath.FromSlash(rel))
+}
+
+// localPathsForAdds returns local paths for files with ActionAdd from the given slice.
+func localPathsForAdds(root, workspace string, files []p4.OpenedFile) []string {
+	var result []string
+	for _, f := range files {
+		if f.Action == p4.ActionAdd {
+			result = append(result, clientToLocal(root, workspace, f.ClientFile))
+		}
+	}
+	return result
 }
 
 // sourceCLsForClientFiles returns unique non-default CL IDs that contain any of the given client paths.

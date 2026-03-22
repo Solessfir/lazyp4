@@ -83,14 +83,10 @@ func (p *CmdLogPane) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (p *CmdLogPane) View() string {
-	border := styleBlurBorder
-	if p.focused {
-		border = styleFocusBorder
-	}
 	innerW := p.width - 2
 	if innerW < 1 {
 		innerW = 1
 	}
-	rendered := border.Width(innerW).Height(CmdLogHeight - 2).Render(p.viewport.View())
-	return injectTitle(rendered, "6", "Log", p.width, p.focused)
+	rendered := styleBlurBorder.Width(innerW).Height(CmdLogHeight - 2).Render(p.viewport.View())
+	return injectTitle(rendered, "", "Log", p.width, false)
 }
