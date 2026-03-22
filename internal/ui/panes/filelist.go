@@ -61,7 +61,9 @@ var (
 			Foreground(lipgloss.Color("12"))
 
 	styleFileEdit = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("3")) // yellow
+			Foreground(lipgloss.Color("3")) // yellow — edit with actual changes
+
+	styleFileCheckedOut = lipgloss.NewStyle() // default — edit with no local changes
 
 	styleFileAdd = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("2")) // green
@@ -818,9 +820,11 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 		case rowKindFile:
 			indent := strings.Repeat("  ", r.depth)
 			f := p.changelists[r.clIndex].Files[r.fileIndex]
-			actionTag := fmt.Sprintf("[%s]", f.Action)
+			// Color conveys action/change state — no action tags shown.
+			// [?] is kept as it signals a required user action (resolve needed).
+			actionTag := ""
 			if f.NeedsResolve {
-				actionTag = "[?] " + actionTag
+				actionTag = "[?] "
 			}
 			name := r.label
 			if p.mode == ViewFlat {
@@ -830,11 +834,15 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 			if p.marked[f.DepotFile] {
 				marker = "* "
 			}
-			raw := fmt.Sprintf("%s%s%s %s", indent, marker, actionTag, name)
+			raw := fmt.Sprintf("%s%s%s%s", indent, marker, actionTag, name)
 			var fileStyle lipgloss.Style
 			switch f.Action {
 			case p4.ActionEdit:
-				fileStyle = styleFileEdit
+				if f.HasChanges {
+					fileStyle = styleFileEdit // yellow — has local changes
+				} else {
+					fileStyle = styleFileCheckedOut // default — checked out, unchanged
+				}
 			case p4.ActionAdd:
 				fileStyle = styleFileAdd
 			case p4.ActionDelete:

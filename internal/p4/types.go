@@ -22,6 +22,7 @@ type OpenedFile struct {
 	Change       string // changelist number, or "default"
 	Revision     int
 	NeedsResolve bool // true when p4 opened reports "unresolved" flag
+	HasChanges   bool // true when local content differs from the have revision (edit only)
 }
 
 // Changelist groups opened files under a single CL.

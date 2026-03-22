@@ -983,6 +983,42 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 	return result, nil
 }
 
+// HasChanges returns true if the file opened for edit differs from the have revision.
+// Do NOT use -f here — that compares against depot HEAD, not the synced revision.
+func (c *Client) HasChanges(clientFile string) (bool, error) {
+	out, err := c.run("diff", "-du", clientFile)
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(out, "@@"), nil
+}
+
+// FilesDiffStatus returns the set of depot paths for open-for-edit files that
+// differ from the have revision. p4 diff exits non-zero when any file differs,
+// so stdout is captured regardless of exit code.
+func (c *Client) FilesDiffStatus() map[string]bool {
+	args := append(c.globalFlags(), "diff", "-du")
+	cmd := exec.Command("p4", args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Run() // exit code ignored — non-zero is normal when any file has changes
+
+	changed := map[string]bool{}
+	var currentDepot string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "--- //") {
+			// format: --- //depot/path\tdate
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				currentDepot = parts[1] // //depot/path, no #rev suffix
+			}
+		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
+			changed[currentDepot] = true
+		}
+	}
+	return changed
+}
+
 // DeletePath marks a file or path (e.g. "//depot/stream/dir/...") for delete.
 func (c *Client) DeletePath(path string) error {
 	_, err := c.run("delete", path)

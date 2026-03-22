@@ -146,9 +146,10 @@ type logDoneMsg struct {
 type browserLoadedMsg struct {
 	parentPath string
 	dirs       []string
-	files      []string                // depot mode only
-	wsEntries  []p4.WorkspaceEntry     // workspace mode only
+	files      []string            // depot mode only
+	wsEntries  []p4.WorkspaceEntry // workspace mode only
 	othersOpen map[string]bool
+	err        error
 }
 
 type browserSearchDoneMsg struct {
@@ -636,6 +637,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(cmds...)
 
+	case revertCheckMsg:
+		if m.hasChanges {
+			a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{m.clientFile}}
+		} else {
+			return a, a.cmdRevert([]string{m.clientFile})
+		}
+		return a, nil
+
 	case revertDoneMsg:
 		n := len(m.files)
 		a.status = fmt.Sprintf("Reverted %d file(s)", n)
@@ -757,6 +766,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdBrowserLoad(m.Path, m.Mode)
 
 	case browserLoadedMsg:
+		if m.err != nil {
+			a.status = "browser load failed: " + m.err.Error()
+			return a, nil
+		}
 		yoursOpen := map[string]bool{}
 		for _, cl := range a.fileList.Changelists() {
 			for _, f := range cl.Files {
@@ -1096,6 +1109,10 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.confirm = &confirmModal{kind: confirmKindDeleteShelf, clID: clID}
 			return a, nil
 		}
+		if a.active == paneBrowser {
+			// handled in the pane-specific section below
+			break
+		}
 		if a.opRunning {
 			a.status = a.opName + " in progress"
 			return a, nil
@@ -1110,12 +1127,23 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			f := a.fileList.SelectedFile()
 			if f != nil {
-				a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}}
+				if f.Action != p4.ActionEdit {
+					// add/delete have no content to lose — revert directly
+					return a, a.cmdRevert([]string{f.ClientFile})
+				}
+				return a, a.cmdRevertCheck(f.ClientFile)
 			} else if clID := a.fileList.SelectedCL(); clID != "" {
 				cls := a.fileList.FilesForCL(clID)
 				if len(cls) == 0 {
 					a.status = "No files in CL " + clID
 					return a, nil
+				}
+				if len(cls) == 1 {
+					f := cls[0]
+					if f.Action != p4.ActionEdit {
+						return a, a.cmdRevert([]string{f.ClientFile})
+					}
+					return a, a.cmdRevertCheck(f.ClientFile)
 				}
 				files := make([]string, len(cls))
 				for i, ff := range cls {
@@ -1198,19 +1226,6 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.cmdResolveList(resolvePath)
 	case "e", "E":
-		if a.active == paneBrowser && m.String() == "e" {
-			path := a.browserPane.SelectedPath()
-			if path == "" {
-				if root := a.browserPane.RootPath(); root != "" {
-					path = root + "/..."
-				}
-			}
-			if path != "" {
-				a.status = "Reconciling " + path + "..."
-				return a, a.cmdReconcile(path)
-			}
-			return a, nil
-		}
 		if a.active == paneFileList {
 			noRevert := m.String() == "E"
 			if files := a.filesToShelve(); len(files) > 0 {
@@ -1283,6 +1298,41 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "h":
 			a.browserPane.CollapseCurrentOrParent()
+			return a, nil
+		case "d":
+			if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
+				// Find the opened file matching this depot path.
+				var found *p4.OpenedFile
+				for _, cl := range a.fileList.Changelists() {
+					for i := range cl.Files {
+						if cl.Files[i].DepotFile == sel.DepotPath {
+							found = &cl.Files[i]
+							break
+						}
+					}
+					if found != nil {
+						break
+					}
+				}
+				if found != nil {
+					if found.Action != p4.ActionEdit {
+						return a, a.cmdRevert([]string{found.ClientFile})
+					}
+					return a, a.cmdRevertCheck(found.ClientFile)
+				}
+			}
+			return a, nil
+		case " ":
+			path := a.browserPane.SelectedPath()
+			if path == "" {
+				if root := a.browserPane.RootPath(); root != "" {
+					path = root + "/..."
+				}
+			}
+			if path != "" {
+				a.status = "Reconciling " + path + "..."
+				return a, a.cmdReconcile(path)
+			}
 			return a, nil
 		}
 		cmd = a.browserPane.Update(m)
@@ -2135,10 +2185,10 @@ func (a *App) helpContent() string {
 		local = []row{
 			{k: "enter / l", desc: "Expand directory"},
 			{k: "h", desc: "Collapse directory"},
+			{k: "space", desc: "Reconcile file or folder (edit / add / delete)"},
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
-			{k: "e", desc: "Reconcile file or folder (edit / add / delete)"},
 			{k: "D", desc: "Mark for delete"},
 			{k: "F", desc: "Force sync selected file or folder"},
 		}
@@ -2183,7 +2233,7 @@ func (a *App) helpContent() string {
 	global := []row{
 		{k: "j / k", desc: "Navigate"},
 		{k: "g", desc: "Toggle History / Diff pane"},
-		{k: "tab / left / right", desc: "Cycle panel focus"},
+		{k: "tab", desc: "Cycle panel focus"},
 		{k: "1–6", desc: "Jump to pane by number"},
 		{k: "esc", desc: "Back to browser"},
 		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
@@ -2310,6 +2360,13 @@ func (a *App) refresh() tea.Cmd {
 				}
 			}
 		}
+		// Mark edit files that have actual local changes vs the have revision.
+		diffStatus := a.client.FilesDiffStatus()
+		for i := range files {
+			if files[i].Action == p4.ActionEdit {
+				files[i].HasChanges = diffStatus[files[i].DepotFile]
+			}
+		}
 		cls := p4.GroupByChangelist(files)
 		if descs, err := a.client.PendingDescriptions(); err == nil {
 			for i, cl := range cls {
@@ -2392,14 +2449,17 @@ func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 	return func() tea.Msg {
 		wildcard := path + "/*"
-		othersOpen, _ := a.client.OpenedByOthers(wildcard)
+		othersOpen, _ := a.client.OpenedByOthers(wildcard) // best-effort, failure is non-fatal
 		if mode == panes.BrowserModeWorkspace {
-			dirs, wsEntries, _ := a.client.BrowserWorkspaceEntries(path)
-			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen}
+			dirs, wsEntries, err := a.client.BrowserWorkspaceEntries(path)
+			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen, err: err}
 		}
-		dirs, _ := a.client.BrowserDirs(wildcard)
-		files, _ := a.client.BrowserDepotFiles(wildcard)
-		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen}
+		dirs, err := a.client.BrowserDirs(wildcard)
+		if err != nil {
+			return browserLoadedMsg{parentPath: path, err: err}
+		}
+		files, err := a.client.BrowserDepotFiles(wildcard)
+		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen, err: err}
 	}
 }
 
@@ -2408,6 +2468,22 @@ func (a *App) cmdResolveList(path string) tea.Cmd {
 	return func() tea.Msg {
 		conflicts, err := a.client.ResolveList(path)
 		return conflictsDoneMsg{conflicts: conflicts, err: err}
+	}
+}
+
+type revertCheckMsg struct {
+	clientFile string
+	hasChanges bool
+}
+
+func (a *App) cmdRevertCheck(clientFile string) tea.Cmd {
+	return func() tea.Msg {
+		hasChanges, err := a.client.HasChanges(clientFile)
+		if err != nil {
+			// if we can't determine, assume changed and show modal
+			hasChanges = true
+		}
+		return revertCheckMsg{clientFile: clientFile, hasChanges: hasChanges}
 	}
 }
 
