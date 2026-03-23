@@ -2205,6 +2205,15 @@ func (a *App) renderHelpModal() string {
 	return panes.InjectTitle(rendered, "?", "Keybindings", totalW, true)
 }
 
+func (a *App) fileListHasFiles() bool {
+	for _, cl := range a.fileList.Changelists() {
+		if len(cl.Files) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) helpContent() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	key := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
@@ -2225,21 +2234,27 @@ func (a *App) helpContent() string {
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
-			{k: "D", desc: "Mark for delete"},
 			{k: "F", desc: "Force sync selected file or folder"},
+		}
+		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
+			local = append(local, row{k: "D", desc: "Mark for delete"})
 		}
 	case paneFileList:
 		local = []row{
-			{k: "space", desc: "Mark / unmark file for submit"},
-			{k: "enter", desc: "Open file"},
-			{k: "l / h", desc: "Expand / collapse folder"},
-			{k: "s", desc: "Submit (opens description form)"},
-			{k: "e", desc: "Shelve (reverts after)"},
-			{k: "E", desc: "Shelve without reverting"},
-			{k: "m", desc: "Move file(s) to a different CL"},
-			{k: "d", desc: "Discard (revert)"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
+		}
+		if a.fileListHasFiles() {
+			local = append([]row{
+				{k: "space", desc: "Mark / unmark file for submit"},
+				{k: "enter", desc: "Open file"},
+				{k: "l / h", desc: "Expand / collapse folder"},
+				{k: "s", desc: "Submit (opens description form)"},
+				{k: "e", desc: "Shelve (reverts after)"},
+				{k: "E", desc: "Shelve without reverting"},
+				{k: "m", desc: "Move file(s) to a different CL"},
+				{k: "d", desc: "Discard (revert)"},
+			}, local...)
 		}
 		if a.resolve.HasConflicts() {
 			local = append(local, row{k: "R", desc: "Show conflicts"})
@@ -2273,14 +2288,18 @@ func (a *App) helpContent() string {
 		{k: "g", desc: "Toggle History / Diff pane"},
 		{k: "tab", desc: "Cycle panel focus"},
 		{k: "1–6", desc: "Jump to pane by number"},
-		{k: "esc", desc: "Back to browser"},
 		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
 		{k: "p", desc: "Sync workspace"},
 		{k: "r", desc: "Refresh"},
-		{k: "c", desc: "Cancel operation (sync / submit)"},
 		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
 		{k: "q", desc: "Quit"},
 		{k: "?", desc: "Close this window"},
+	}
+	if a.active != paneBrowser && a.active != paneResolve {
+		global = append([]row{{k: "esc", desc: "Back to browser"}}, global...)
+	}
+	if a.opRunning {
+		global = append(global, row{k: "c", desc: "Cancel operation (sync / submit)"})
 	}
 	if !a.isStreamDepot {
 		global = append([]row{{k: "i", desc: "Integrate (classic depot)"}}, global...)
