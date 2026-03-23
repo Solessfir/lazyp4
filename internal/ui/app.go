@@ -2235,9 +2235,11 @@ func (a *App) helpContent() string {
 			{k: "E", desc: "Shelve without reverting"},
 			{k: "m", desc: "Move file(s) to a different CL"},
 			{k: "d", desc: "Discard (revert)"},
-			{k: "R", desc: "Show conflicts"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
+		}
+		if a.resolve.HasConflicts() {
+			local = append(local, row{k: "R", desc: "Show conflicts"})
 		}
 	case paneStreams:
 		local = []row{

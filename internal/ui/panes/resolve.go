@@ -50,6 +50,9 @@ func (p *ResolvePane) SetConflicts(conflicts []p4.ConflictFile) {
 	}
 }
 
+// HasConflicts reports whether there are any unresolved conflicts.
+func (p *ResolvePane) HasConflicts() bool { return len(p.conflicts) > 0 }
+
 // Init satisfies tea.Model.
 func (p *ResolvePane) Init() tea.Cmd { return nil }
 
