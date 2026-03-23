@@ -870,90 +870,72 @@ type WorkspaceEntry struct {
 	Tracked   bool   // true if synced via p4 have
 }
 
-// BrowserWorkspaceEntries lists all entries visible under a depot directory in the workspace,
-// combining p4 have (tracked) with a local filesystem scan (untracked).
-// depotPath is the depot directory path (e.g. "//depot/stream/src").
-func (c *Client) BrowserWorkspaceEntries(depotPath string) (dirs []string, files []WorkspaceEntry, err error) {
+// BrowserWorkspaceFast returns directories and files visible in the local workspace
+// from a filesystem scan only — no p4 server calls. All files are returned with
+// Tracked=false; call BrowserWorkspaceStatus to overlay p4 data.
+func (c *Client) BrowserWorkspaceFast(depotPath string) (dirs []string, files []WorkspaceEntry, err error) {
 	if c.Root == "" || c.Stream == "" {
 		return nil, nil, nil
 	}
-
-	// Compute local directory path from depot path.
 	rel := strings.TrimPrefix(depotPath, c.Stream)
 	localDir := c.Root + rel
-
-	// List local filesystem entries.
-	entries, fsErr := os.ReadDir(localDir)
-	if fsErr != nil {
-		// Directory doesn't exist locally yet — fall back to p4 have only.
-		haveFiles, haveErr := c.BrowserHaveFiles(depotPath + "/*")
-		return nil, toTrackedEntries(haveFiles, depotPath, c.Stream, c.Root), haveErr
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	// Get synced files and depot dirs in parallel.
-	var haveFiles, depotDirs []string
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); haveFiles, _ = c.BrowserHaveFiles(depotPath + "/*") }()
-	go func() { defer wg.Done(); depotDirs, _ = c.BrowserDirs(depotPath + "/*") }()
-	wg.Wait()
-
-	haveSet := map[string]bool{}
-	for _, f := range haveFiles {
-		haveSet[f] = true
-	}
-
-	depotDirSet := map[string]bool{}
-	for _, d := range depotDirs {
-		depotDirSet[d] = true
-		dirs = append(dirs, d)
-	}
-
 	for _, e := range entries {
-		// Skip hidden files and p4 metadata.
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		localPath := localDir + "/" + e.Name()
 		computedDepot := c.Stream + rel + "/" + e.Name()
 		if e.IsDir() {
-			if !depotDirSet[computedDepot] {
-				dirs = append(dirs, computedDepot)
-			}
+			dirs = append(dirs, computedDepot)
 		} else {
 			files = append(files, WorkspaceEntry{
 				DepotPath: computedDepot,
-				LocalPath: localPath,
-				Tracked:   haveSet[computedDepot],
+				LocalPath: localDir + "/" + e.Name(),
+				Tracked:   false,
 			})
 		}
 	}
+	return dirs, files, nil
+}
 
-	// Add tracked files not found locally (e.g. deleted on disk).
+// BrowserWorkspaceStatus fetches p4-side data for a workspace directory:
+// tracked file paths, depot subdirectory paths, and any tracked files missing
+// from the local filesystem (e.g. deleted on disk).
+func (c *Client) BrowserWorkspaceStatus(depotPath string) (haveFiles, depotDirs []string, missingFiles []WorkspaceEntry, err error) {
+	if c.Root == "" || c.Stream == "" {
+		return nil, nil, nil, nil
+	}
+	rel := strings.TrimPrefix(depotPath, c.Stream)
+	localDir := c.Root + rel
+	wildcard := depotPath + "/*"
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); haveFiles, err = c.BrowserHaveFiles(wildcard) }()
+	go func() { defer wg.Done(); depotDirs, _ = c.BrowserDirs(wildcard) }()
+	wg.Wait()
+
+	// Find tracked files missing from local filesystem.
+	entries, fsErr := os.ReadDir(localDir)
 	localNames := map[string]bool{}
-	for _, e := range entries {
-		localNames[e.Name()] = true
+	if fsErr == nil {
+		for _, e := range entries {
+			localNames[e.Name()] = true
+		}
 	}
 	for _, f := range haveFiles {
 		name := f[strings.LastIndex(f, "/")+1:]
 		if !localNames[name] {
-			localPath := localDir + "/" + name
-			files = append(files, WorkspaceEntry{DepotPath: f, LocalPath: localPath, Tracked: true})
+			missingFiles = append(missingFiles, WorkspaceEntry{
+				DepotPath: f,
+				LocalPath: localDir + "/" + name,
+				Tracked:   true,
+			})
 		}
 	}
-
-	return dirs, files, nil
-}
-
-func toTrackedEntries(depotPaths []string, depotDir, stream, root string) []WorkspaceEntry {
-	rel := strings.TrimPrefix(depotDir, stream)
-	localDir := root + rel
-	var out []WorkspaceEntry
-	for _, dp := range depotPaths {
-		name := dp[strings.LastIndex(dp, "/")+1:]
-		out = append(out, WorkspaceEntry{DepotPath: dp, LocalPath: localDir + "/" + name, Tracked: true})
-	}
-	return out
+	return haveFiles, depotDirs, missingFiles, err
 }
 
 // AddFile opens a local file for add in the default changelist.

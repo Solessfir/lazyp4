@@ -150,10 +150,25 @@ type logDoneMsg struct {
 type browserLoadedMsg struct {
 	parentPath string
 	dirs       []string
-	files      []string            // depot mode only
-	wsEntries  []p4.WorkspaceEntry // workspace mode only
+	files      []string // depot mode only
 	othersOpen map[string]bool
 	err        error
+}
+
+type browserFastMsg struct {
+	parentPath string
+	dirs       []string
+	files      []p4.WorkspaceEntry
+	err        error
+}
+
+type browserStatusMsg struct {
+	parentPath   string
+	haveFiles    []string
+	depotDirs    []string
+	missingFiles []p4.WorkspaceEntry
+	othersOpen   map[string]bool
+	err          error
 }
 
 type browserSearchDoneMsg struct {
@@ -786,7 +801,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				yoursOpen[f.DepotFile] = true
 			}
 		}
-		autoExpand := a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, m.wsEntries, yoursOpen, m.othersOpen)
+		autoExpand := a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, nil, yoursOpen, m.othersOpen)
 		a.relayout()
 		if autoExpand != "" && a.browserNavTarget == "" {
 			return a, a.cmdBrowserLoad(autoExpand, a.browserPane.Mode())
@@ -796,6 +811,52 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.browserNavTarget = ""
 			} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
 				return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
+			} else {
+				a.browserNavTarget = ""
+			}
+		}
+		return a, nil
+
+	case browserFastMsg:
+		if m.err == nil {
+			autoExpand := a.browserPane.LoadChildrenFast(m.parentPath, m.dirs, m.files)
+			a.relayout()
+			if autoExpand != "" && a.browserNavTarget == "" {
+				return a, a.cmdBrowserLoad(autoExpand, panes.BrowserModeWorkspace)
+			}
+			if a.browserNavTarget != "" {
+				if a.browserPane.NavigateTo(a.browserNavTarget) {
+					a.browserNavTarget = ""
+				} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
+					return a, a.cmdBrowserLoad(next, panes.BrowserModeWorkspace)
+				} else {
+					a.browserNavTarget = ""
+				}
+			}
+		}
+		return a, nil
+
+	case browserStatusMsg:
+		if m.err != nil {
+			a.status = "browser load failed: " + m.err.Error()
+			return a, nil
+		}
+		yoursOpen := map[string]bool{}
+		for _, cl := range a.fileList.Changelists() {
+			for _, f := range cl.Files {
+				yoursOpen[f.DepotFile] = true
+			}
+		}
+		autoExpand := a.browserPane.ApplyStatus(m.parentPath, m.haveFiles, m.depotDirs, m.missingFiles, yoursOpen, m.othersOpen)
+		a.relayout()
+		if autoExpand != "" && a.browserNavTarget == "" {
+			return a, a.cmdBrowserLoad(autoExpand, panes.BrowserModeWorkspace)
+		}
+		if a.browserNavTarget != "" {
+			if a.browserPane.NavigateTo(a.browserNavTarget) {
+				a.browserNavTarget = ""
+			} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
+				return a, a.cmdBrowserLoad(next, panes.BrowserModeWorkspace)
 			} else {
 				a.browserNavTarget = ""
 			}
@@ -2505,20 +2566,31 @@ func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 }
 
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
+	wildcard := path + "/*"
+	if mode == panes.BrowserModeWorkspace {
+		return tea.Batch(
+			func() tea.Msg {
+				dirs, files, err := a.client.BrowserWorkspaceFast(path)
+				return browserFastMsg{parentPath: path, dirs: dirs, files: files, err: err}
+			},
+			func() tea.Msg {
+				var haveFiles, depotDirs []string
+				var missingFiles []p4.WorkspaceEntry
+				var othersOpen map[string]bool
+				var statusErr error
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					haveFiles, depotDirs, missingFiles, statusErr = a.client.BrowserWorkspaceStatus(path)
+				}()
+				go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
+				wg.Wait()
+				return browserStatusMsg{parentPath: path, haveFiles: haveFiles, depotDirs: depotDirs, missingFiles: missingFiles, othersOpen: othersOpen, err: statusErr}
+			},
+		)
+	}
 	return func() tea.Msg {
-		wildcard := path + "/*"
-		if mode == panes.BrowserModeWorkspace {
-			var dirs []string
-			var wsEntries []p4.WorkspaceEntry
-			var othersOpen map[string]bool
-			var wsErr error
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
-			go func() { defer wg.Done(); dirs, wsEntries, wsErr = a.client.BrowserWorkspaceEntries(path) }()
-			wg.Wait()
-			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen, err: wsErr}
-		}
 		var dirs, files []string
 		var othersOpen map[string]bool
 		var dirsErr, filesErr error

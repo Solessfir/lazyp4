@@ -440,6 +440,132 @@ func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []str
 	return ""
 }
 
+// LoadChildrenFast populates a node's children from a local filesystem scan only.
+// All files are marked untracked until ApplyStatus is called with p4 data.
+// Returns the path of the sole directory child for auto-expand, or "".
+func (p *BrowserPane) LoadChildrenFast(parentPath string, dirs []string, files []p4.WorkspaceEntry) string {
+	node := p.findNode(p.root, parentPath)
+	if node == nil {
+		return ""
+	}
+	node.children = nil
+	for _, d := range dirs {
+		name := d
+		if idx := strings.LastIndex(d, "/"); idx >= 0 && idx < len(d)-1 {
+			name = d[idx+1:]
+		}
+		node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
+	}
+	for _, e := range files {
+		name := e.DepotPath
+		if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
+			name = e.DepotPath[idx+1:]
+		}
+		node.children = append(node.children, &browserNode{
+			name:      name,
+			path:      e.DepotPath,
+			localPath: e.LocalPath,
+			isDir:     false,
+			tracked:   false,
+		})
+	}
+	node.loaded = true
+	node.expanded = true
+	p.rebuild()
+	if len(node.children) == 1 && node.children[0].isDir {
+		return node.children[0].path
+	}
+	return ""
+}
+
+// ApplyStatus overlays p4 data onto already-loaded children: sets tracked status,
+// openedByMe/Others, adds depot-only dirs, and adds tracked files missing locally.
+// If the node was not yet loaded (fast load failed), creates children from p4 data
+// and returns the auto-expand path. Otherwise returns "".
+func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []string, missingFiles []p4.WorkspaceEntry, yoursOpen, othersOpen map[string]bool) string {
+	node := p.findNode(p.root, parentPath)
+	if node == nil {
+		return ""
+	}
+	haveSet := map[string]bool{}
+	for _, f := range haveFiles {
+		haveSet[f] = true
+	}
+	if !node.loaded {
+		// Fallback: fast load didn't run — create nodes from p4 data.
+		node.children = nil
+		for _, d := range depotDirs {
+			name := d
+			if idx := strings.LastIndex(d, "/"); idx >= 0 && idx < len(d)-1 {
+				name = d[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
+		}
+		for _, e := range missingFiles {
+			name := e.DepotPath
+			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
+				name = e.DepotPath[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{
+				name:           name,
+				path:           e.DepotPath,
+				localPath:      e.LocalPath,
+				isDir:          false,
+				tracked:        true,
+				openedByMe:     yoursOpen[e.DepotPath],
+				openedByOthers: othersOpen[e.DepotPath],
+			})
+		}
+		node.loaded = true
+		node.expanded = true
+		p.rebuild()
+		if len(node.children) == 1 && node.children[0].isDir {
+			return node.children[0].path
+		}
+		return ""
+	}
+	// Update existing children with p4 data.
+	childPaths := map[string]bool{}
+	for _, c := range node.children {
+		childPaths[c.path] = true
+		if !c.isDir {
+			c.tracked = haveSet[c.path]
+			c.openedByMe = yoursOpen[c.path]
+			c.openedByOthers = othersOpen[c.path]
+		}
+	}
+	// Add depot-only dirs not in local filesystem.
+	for _, d := range depotDirs {
+		if !childPaths[d] {
+			name := d
+			if idx := strings.LastIndex(d, "/"); idx >= 0 && idx < len(d)-1 {
+				name = d[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
+		}
+	}
+	// Add tracked files missing from local filesystem.
+	for _, e := range missingFiles {
+		if !childPaths[e.DepotPath] {
+			name := e.DepotPath
+			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
+				name = e.DepotPath[idx+1:]
+			}
+			node.children = append(node.children, &browserNode{
+				name:           name,
+				path:           e.DepotPath,
+				localPath:      e.LocalPath,
+				isDir:          false,
+				tracked:        true,
+				openedByMe:     yoursOpen[e.DepotPath],
+				openedByOthers: othersOpen[e.DepotPath],
+			})
+		}
+	}
+	p.rebuild()
+	return ""
+}
+
 func (p *BrowserPane) findNode(node *browserNode, path string) *browserNode {
 	if node == nil {
 		return nil
