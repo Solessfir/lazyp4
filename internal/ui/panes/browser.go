@@ -699,7 +699,7 @@ func (p *BrowserPane) renderLines(innerW, innerH int) string {
 		row := rows[i]
 		var line string
 		if i == cur && p.focused {
-			line = styleCursor.Width(innerW).Render(p.renderRowPlain(row))
+			line = styleCursor.Width(innerW).Render(p.renderRowPlain(row, innerW))
 		} else {
 			line = p.renderRow(row, innerW)
 		}
@@ -720,14 +720,30 @@ func (p *BrowserPane) renderLines(innerW, innerH int) string {
 	return sb.String()
 }
 
+func truncateName(name string, available int) string {
+	if available <= 0 {
+		return ""
+	}
+	runes := []rune(name)
+	if len(runes) <= available {
+		return name
+	}
+	if available <= 1 {
+		return "…"
+	}
+	return string(runes[:available-1]) + "…"
+}
+
 func (p *BrowserPane) renderRow(row browserRow, maxW int) string {
 	indent := strings.Repeat("  ", row.depth)
+	prefixW := row.depth*2 + 2 // indent + icon/indicator (always 2 visible chars)
+	name := truncateName(row.node.name, maxW-prefixW)
 	if row.node.isDir {
 		icon := "▶ "
 		if row.node.expanded {
 			icon = "▼ "
 		}
-		return styleBrowserDir.Render(indent + icon + row.node.name)
+		return styleBrowserDir.Render(indent + icon + name)
 	}
 	var indicator string
 	switch {
@@ -749,19 +765,21 @@ func (p *BrowserPane) renderRow(row browserRow, maxW int) string {
 	default:
 		fileStyle = styleBrowserWsFile
 	}
-	return indent + indicator + fileStyle.Render(row.node.name)
+	return indent + indicator + fileStyle.Render(name)
 }
 
 // renderRowPlain renders a row as plain text with no ANSI color codes, for use as
 // cursor row content (cursor background style is applied by the caller).
-func (p *BrowserPane) renderRowPlain(row browserRow) string {
+func (p *BrowserPane) renderRowPlain(row browserRow, maxW int) string {
 	indent := strings.Repeat("  ", row.depth)
+	prefixW := row.depth*2 + 2
+	name := truncateName(row.node.name, maxW-prefixW)
 	if row.node.isDir {
 		icon := "▶ "
 		if row.node.expanded {
 			icon = "▼ "
 		}
-		return indent + icon + row.node.name
+		return indent + icon + name
 	}
 	var indicator string
 	switch {
@@ -774,5 +792,5 @@ func (p *BrowserPane) renderRowPlain(row browserRow) string {
 	default:
 		indicator = "  "
 	}
-	return indent + indicator + row.node.name
+	return indent + indicator + name
 }
