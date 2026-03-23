@@ -785,8 +785,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				yoursOpen[f.DepotFile] = true
 			}
 		}
-		a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, m.wsEntries, yoursOpen, m.othersOpen)
+		autoExpand := a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, m.wsEntries, yoursOpen, m.othersOpen)
 		a.relayout()
+		if autoExpand != "" && a.browserNavTarget == "" {
+			return a, a.cmdBrowserLoad(autoExpand, a.browserPane.Mode())
+		}
 		if a.browserNavTarget != "" {
 			if a.browserPane.NavigateTo(a.browserNavTarget) {
 				a.browserNavTarget = ""

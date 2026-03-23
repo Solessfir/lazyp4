@@ -384,10 +384,11 @@ func (p *BrowserPane) refreshYoursNode(node *browserNode, yours map[string]bool)
 // yoursOpen and othersOpen are sets of depot paths; nil means no data available.
 // wsEntries is used for workspace mode (includes untracked files); pass nil for depot mode.
 // files is used for depot mode when wsEntries is nil.
-func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []string, wsEntries []p4.WorkspaceEntry, yoursOpen, othersOpen map[string]bool) {
+// Returns the path of the sole directory child if auto-expand should be triggered, otherwise "".
+func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []string, wsEntries []p4.WorkspaceEntry, yoursOpen, othersOpen map[string]bool) string {
 	node := p.findNode(p.root, parentPath)
 	if node == nil {
-		return
+		return ""
 	}
 	node.children = nil
 	for _, d := range dirs {
@@ -432,6 +433,11 @@ func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []str
 	node.loaded = true
 	node.expanded = true
 	p.rebuild()
+	// Auto-expand: if the only child is a directory, return its path for the caller to load.
+	if len(node.children) == 1 && node.children[0].isDir {
+		return node.children[0].path
+	}
+	return ""
 }
 
 func (p *BrowserPane) findNode(node *browserNode, path string) *browserNode {
