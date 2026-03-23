@@ -27,7 +27,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 - Go 1.21+
 - `p4` CLI installed and in `$PATH`
-- A configured Perforce workspace (`P4PORT`, `P4USER`, `P4CLIENT` or `~/.lazyp4.toml`)
+- A configured Perforce workspace (`P4PORT`, `P4USER`, `P4CLIENT`, a P4CONFIG file, or the lazyp4 config file)
 
 ## Installation
 
@@ -43,20 +43,36 @@ go build -o lazyp4 ./cmd/main.go
 
 ## Configuration
 
-lazyp4 reads `~/.lazyp4.toml`:
+Connection settings are resolved in this order (highest priority first):
+
+1. **P4CONFIG file** — if `$P4CONFIG` is set, lazyp4 walks up from the current directory looking for that file (e.g. `.p4config`)
+2. **Environment variables** — `P4PORT`, `P4USER`, `P4CLIENT`
+3. **lazyp4.toml** — platform config file (lowest priority)
+
+Config file location:
+
+| Platform | Path |
+|----------|------|
+| Linux    | `~/.config/lazyp4/lazyp4.toml` |
+| macOS    | `~/Library/Application Support/lazyp4/lazyp4.toml` |
+| Windows  | `<lazyp4.exe directory>/lazyp4.toml` |
+
+All fields are optional:
 
 ```toml
-# Perforce server address. Use "ssl:" prefix for SSL connections.
-port      = "ssl:your-server:1666"
+[p4]
+port         = "ssl:your-server:1666"  # Perforce server address
+user         = "youruser"              # Perforce username
+client       = "your-workspace"        # Workspace (client) name
+env_over_toml = true                   # true: env vars win over toml; false: toml wins
 
-# Perforce username.
-user      = "youruser"
+[auth]
+store_password = false           # Cache password in system keyring
 
-# Workspace (client) name.
-workspace = "your-workspace"
+[ui]
+theme          = "dark"          # "dark" or "light"
+fetch_interval = "10m"           # Background refresh interval (empty = disabled)
 ```
-
-All fields are optional — environment variables `P4PORT`, `P4USER`, and `P4CLIENT` take precedence, and lazyp4 will also pick up whatever is already set in your `p4` environment (e.g. from `p4 set` or `~/.p4enviro`).
 
 ## Keybindings
 
