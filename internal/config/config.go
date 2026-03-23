@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -16,9 +19,10 @@ type Config struct {
 
 // P4Config holds Perforce connection settings.
 type P4Config struct {
-	Port      string `toml:"port"`
-	Client    string `toml:"client"`
-	User      string `toml:"user"`
+	Port       string `toml:"port"`
+	Client     string `toml:"client"`
+	User       string `toml:"user"`
+	EnvOverTOML bool   `toml:"env_over_toml"` // if true, env vars take precedence over toml values
 }
 
 // AuthConfig controls authentication behaviour.
@@ -32,31 +36,133 @@ type UIConfig struct {
 	FetchInterval string `toml:"fetch_interval"` // e.g. "10m", "30s". Empty = disabled.
 }
 
-// Load reads ~/.lazyp4.toml and merges environment variables.
-// Env vars P4PORT, P4CLIENT, P4USER take precedence over the file.
+// Load reads the platform config file, then overrides with env vars, then
+// overrides with a P4CONFIG file found by walking up from CWD.
+//
+// Precedence (highest → lowest):
+//
+//	P4CONFIG file in CWD (or ancestor) > env vars > lazyp4.toml
 func Load() (*Config, error) {
 	cfg := &Config{
-		Auth: AuthConfig{StorePassword: true},
+		P4:   P4Config{EnvOverTOML: true},
+		Auth: AuthConfig{StorePassword: false},
 		UI:   UIConfig{Theme: "dark", FetchInterval: "10m"},
 	}
 
-	path := filepath.Join(os.Getenv("HOME"), ".lazyp4.toml")
-	if _, err := os.Stat(path); err == nil {
-		if _, err := toml.DecodeFile(path, cfg); err != nil {
-			return nil, err
+	// 1. lazyp4.toml — read first to get EnvOverTOML flag and base P4 values.
+	if path, err := configPath(); err == nil {
+		if _, err := os.Stat(path); err == nil {
+			if _, err := toml.DecodeFile(path, cfg); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	// Env vars override file values.
-	if v := os.Getenv("P4PORT"); v != "" {
-		cfg.P4.Port = v
+	// 2. Merge env vars according to precedence.
+	//    env_over_toml=true (default): env wins when both are set.
+	//    env_over_toml=false: toml wins; env only fills fields toml left empty.
+	envPort := os.Getenv("P4PORT")
+	envClient := os.Getenv("P4CLIENT")
+	envUser := os.Getenv("P4USER")
+	if cfg.P4.EnvOverTOML {
+		if envPort != "" {
+			cfg.P4.Port = envPort
+		}
+		if envClient != "" {
+			cfg.P4.Client = envClient
+		}
+		if envUser != "" {
+			cfg.P4.User = envUser
+		}
+	} else {
+		if cfg.P4.Port == "" {
+			cfg.P4.Port = envPort
+		}
+		if cfg.P4.Client == "" {
+			cfg.P4.Client = envClient
+		}
+		if cfg.P4.User == "" {
+			cfg.P4.User = envUser
+		}
 	}
-	if v := os.Getenv("P4CLIENT"); v != "" {
-		cfg.P4.Client = v
-	}
-	if v := os.Getenv("P4USER"); v != "" {
-		cfg.P4.User = v
+
+	// 3. P4CONFIG file always wins (highest priority).
+	// Only searched when $P4CONFIG names a file, matching standard p4 behaviour.
+	if p4cfg := loadP4Config(); p4cfg != nil {
+		if v, ok := p4cfg["P4PORT"]; ok {
+			cfg.P4.Port = v
+		}
+		if v, ok := p4cfg["P4CLIENT"]; ok {
+			cfg.P4.Client = v
+		}
+		if v, ok := p4cfg["P4USER"]; ok {
+			cfg.P4.User = v
+		}
 	}
 
 	return cfg, nil
+}
+
+// configPath returns the platform-appropriate path for lazyp4.toml.
+//
+//	Linux  : ~/.config/lazyp4/lazyp4.toml
+//	macOS  : ~/Library/Application Support/lazyp4/lazyp4.toml
+//	Windows: <dir of lazyp4.exe>/lazyp4.toml
+func configPath() (string, error) {
+	if runtime.GOOS == "windows" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(filepath.Dir(exe), "lazyp4.toml"), nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "lazyp4", "lazyp4.toml"), nil
+}
+
+// loadP4Config searches CWD and its ancestors for the file named by $P4CONFIG.
+// Returns nil if $P4CONFIG is unset or no file is found.
+func loadP4Config() map[string]string {
+	name := os.Getenv("P4CONFIG")
+	if name == "" {
+		return nil
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		path := filepath.Join(dir, name)
+		if f, err := os.Open(path); err == nil {
+			result := parseKeyValue(f)
+			f.Close()
+			return result
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+	}
+	return nil
+}
+
+// parseKeyValue reads simple KEY=VALUE lines, ignoring comments and blanks.
+func parseKeyValue(f *os.File) map[string]string {
+	m := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return m
 }
