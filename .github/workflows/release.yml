@@ -2,6 +2,8 @@ name: Build
 
 on:
   push:
+    tags:
+      - "v*"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -11,8 +13,31 @@ permissions:
 
 jobs:
   build:
-    name: Build
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.suffix }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            suffix: linux_x86_64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            suffix: linux_arm64
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            suffix: darwin_x86_64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            suffix: darwin_arm64
+          - os: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            suffix: windows_x86_64
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -23,36 +48,40 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build Linux (amd64)
+      - name: Build
         run: |
-          mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/lazyp4 ./cmd/main.go
-          tar -czf dist/lazyp4-linux-amd64.tar.gz -C dist lazyp4
-          rm dist/lazyp4
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w" -o lazyp4.exe ./cmd/main.go
+            zip lazyp4_${{ matrix.suffix }}.zip lazyp4.exe
+          else
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w" -o lazyp4 ./cmd/main.go
+            tar -czf lazyp4_${{ matrix.suffix }}.tar.gz lazyp4
+          fi
 
-      - name: Build Windows (amd64)
-        run: |
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/lazyp4.exe ./cmd/main.go
-          cd dist && zip lazyp4-windows-amd64.zip lazyp4.exe && rm lazyp4.exe
-
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lazyp4-${{ github.sha }}
-          path: dist/
+          name: lazyp4_${{ matrix.suffix }}
+          path: lazyp4_${{ matrix.suffix }}.*
 
-      - name: Short SHA
-        id: sha
-        run: echo "short=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
 
-      - name: Delete existing release
-        run: gh release delete latest --yes --cleanup-tag || true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: Latest · ${{ steps.sha.outputs.short }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           files: dist/*
