@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -2506,17 +2507,31 @@ func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 	return func() tea.Msg {
 		wildcard := path + "/*"
-		othersOpen, _ := a.client.OpenedByOthers(wildcard) // best-effort, failure is non-fatal
 		if mode == panes.BrowserModeWorkspace {
-			dirs, wsEntries, err := a.client.BrowserWorkspaceEntries(path)
-			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen, err: err}
+			var dirs []string
+			var wsEntries []p4.WorkspaceEntry
+			var othersOpen map[string]bool
+			var wsErr error
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
+			go func() { defer wg.Done(); dirs, wsEntries, wsErr = a.client.BrowserWorkspaceEntries(path) }()
+			wg.Wait()
+			return browserLoadedMsg{parentPath: path, dirs: dirs, wsEntries: wsEntries, othersOpen: othersOpen, err: wsErr}
 		}
-		dirs, err := a.client.BrowserDirs(wildcard)
-		if err != nil {
-			return browserLoadedMsg{parentPath: path, err: err}
+		var dirs, files []string
+		var othersOpen map[string]bool
+		var dirsErr, filesErr error
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
+		go func() { defer wg.Done(); dirs, dirsErr = a.client.BrowserDirs(wildcard) }()
+		go func() { defer wg.Done(); files, filesErr = a.client.BrowserDepotFiles(wildcard) }()
+		wg.Wait()
+		if dirsErr != nil {
+			return browserLoadedMsg{parentPath: path, err: dirsErr}
 		}
-		files, err := a.client.BrowserDepotFiles(wildcard)
-		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen, err: err}
+		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen, err: filesErr}
 	}
 }
 

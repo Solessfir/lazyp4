@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -889,15 +890,19 @@ func (c *Client) BrowserWorkspaceEntries(depotPath string) (dirs []string, files
 		return nil, toTrackedEntries(haveFiles, depotPath, c.Stream, c.Root), haveErr
 	}
 
-	// Get synced files for tracking status.
-	haveFiles, _ := c.BrowserHaveFiles(depotPath + "/*")
+	// Get synced files and depot dirs in parallel.
+	var haveFiles, depotDirs []string
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); haveFiles, _ = c.BrowserHaveFiles(depotPath + "/*") }()
+	go func() { defer wg.Done(); depotDirs, _ = c.BrowserDirs(depotPath + "/*") }()
+	wg.Wait()
+
 	haveSet := map[string]bool{}
 	for _, f := range haveFiles {
 		haveSet[f] = true
 	}
 
-	// Get depot dirs (may include dirs with no local presence).
-	depotDirs, _ := c.BrowserDirs(depotPath + "/*")
 	depotDirSet := map[string]bool{}
 	for _, d := range depotDirs {
 		depotDirSet[d] = true
