@@ -6,6 +6,9 @@ A lazygit-inspired terminal UI for Perforce (p4).
 > **Use at your own risk.** I use lazyp4 in a production environment daily without issues, but I take no responsibility if it wipes your depot, destroys local data, or causes any other damage.
 
 ![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
+![License](https://img.shields.io/badge/License-MIT-green)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
+![Release](https://img.shields.io/github/v/release/Solessfir/lazyp4)
 
 ## Features
 
