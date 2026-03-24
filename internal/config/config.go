@@ -12,9 +12,15 @@ import (
 
 // Config holds all lazyp4 configuration.
 type Config struct {
-	P4   P4Config   `toml:"p4"`
-	Auth AuthConfig `toml:"auth"`
-	UI   UIConfig   `toml:"ui"`
+	P4    P4Config    `toml:"p4"`
+	Auth  AuthConfig  `toml:"auth"`
+	UI    UIConfig    `toml:"ui"`
+	Linux LinuxConfig `toml:"linux"`
+}
+
+// LinuxConfig holds Linux-specific settings.
+type LinuxConfig struct {
+	FileManager string `toml:"file_manager"` // e.g. "nemo", "nautilus". Auto-detected if empty.
 }
 
 // P4Config holds Perforce connection settings.

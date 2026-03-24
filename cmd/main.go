@@ -50,7 +50,7 @@ func main() {
 		}
 	}
 
-	app := ui.New(client, fetchInterval)
+	app := ui.New(client, fetchInterval, cfg.Linux.FileManager)
 	prog := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := prog.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui error: %v\n", err)

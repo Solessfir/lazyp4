@@ -278,8 +278,9 @@ type authDoneMsg struct{ err error }
 
 // App is the root bubbletea model.
 type App struct {
-	client        *p4.Client
-	fetchInterval time.Duration
+	client          *p4.Client
+	fetchInterval   time.Duration
+	linuxFileManager string // empty = auto-detect
 	active        activePane
 
 	// operation in progress (sync or submit)
@@ -324,11 +325,12 @@ type App struct {
 }
 
 // New creates the root App model.
-func New(client *p4.Client, fetchInterval time.Duration) *App {
+func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string) *App {
 	hv := viewport.New(54, 20)
 	a := &App{
-		client:        client,
-		fetchInterval: fetchInterval,
+		client:           client,
+		fetchInterval:    fetchInterval,
+		linuxFileManager: linuxFileManager,
 		active:        paneBrowser,
 		statusPane:  panes.NewStatusPane(),
 		browserPane: panes.NewBrowserPane(),
@@ -1139,6 +1141,26 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.cmdBrowserLoad(path, a.browserPane.Mode()),
 				a.cmdBrowserSearch(path, a.browserPane.Mode()),
 			)
+		}
+		return a, nil
+	case "o":
+		var localPath string
+		switch a.active {
+		case paneBrowser:
+			if sel := a.browserPane.SelectedEntry(); sel != nil && sel.LocalPath != "" {
+				localPath = sel.LocalPath
+			}
+		case paneFileList:
+			if f := a.fileList.SelectedFile(); f != nil {
+				localPath = clientToLocal(a.client.Root, a.client.Workspace, f.ClientFile)
+			}
+		}
+		if localPath == "" {
+			a.status = "No local file selected"
+			return a, nil
+		}
+		if err := revealInExplorer(localPath, a.linuxFileManager); err != nil {
+			a.status = "reveal error: " + err.Error()
 		}
 		return a, nil
 	case "F":
@@ -2298,8 +2320,13 @@ func (a *App) helpContent() string {
 			{k: "/", desc: "Filter / search"},
 			{k: "F", desc: "Force sync selected file or folder"},
 		}
-		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
-			local = append(local, row{k: "D", desc: "Mark for delete"})
+		if sel := a.browserPane.SelectedEntry(); sel != nil {
+			if sel.LocalPath != "" {
+				local = append(local, row{k: "o", desc: "Reveal in file manager"})
+			}
+			if !sel.IsDir {
+				local = append(local, row{k: "D", desc: "Mark for delete"})
+			}
 		}
 	case paneFileList:
 		local = []row{
@@ -2310,6 +2337,7 @@ func (a *App) helpContent() string {
 			local = append([]row{
 				{k: "space", desc: "Mark / unmark file for submit"},
 				{k: "enter", desc: "Open file"},
+				{k: "o", desc: "Reveal in file manager"},
 				{k: "l / h", desc: "Expand / collapse folder"},
 				{k: "s", desc: "Submit (opens description form)"},
 				{k: "e", desc: "Shelve (reverts after)"},
@@ -3034,6 +3062,39 @@ func isNumeric(s string) bool {
 		}
 	}
 	return len(s) > 0
+}
+
+// revealInExplorer opens the file manager at the given local path, highlighting it if possible.
+// On Linux, fileManager overrides auto-detection when non-empty.
+func revealInExplorer(localPath, fileManager string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer", "/select,"+localPath)
+	case "darwin":
+		cmd = exec.Command("open", "-R", localPath)
+	default:
+		dir := localPath
+		info, err := os.Stat(localPath)
+		if err != nil || !info.IsDir() {
+			dir = filepath.Dir(localPath)
+		}
+		if fileManager == "" {
+			fileManager = detectLinuxFileManager()
+		}
+		cmd = exec.Command(fileManager, dir)
+	}
+	return cmd.Start()
+}
+
+// detectLinuxFileManager returns the first available file manager from a known list.
+func detectLinuxFileManager() string {
+	for _, fm := range []string{"nemo", "nautilus", "dolphin", "thunar", "pcmanfm", "xdg-open"} {
+		if _, err := exec.LookPath(fm); err == nil {
+			return fm
+		}
+	}
+	return "xdg-open"
 }
 
 // openWithDefault launches the given local file with the OS default application in the background.
