@@ -1031,7 +1031,7 @@ func (c *Client) IntegrateClassic(source, target string) (string, error) {
 
 // SyncDryRun returns the number of changelists the workspace is behind head.
 func (c *Client) SyncDryRun() (int, error) {
-	out, err := c.run("changes", "-s", "submitted", "//...@have,#head")
+	out, err := c.run("changes", "-s", "submitted", fmt.Sprintf("//...@%s,#head", c.Workspace))
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no such file") {
