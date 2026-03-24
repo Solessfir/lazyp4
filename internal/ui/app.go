@@ -750,6 +750,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.err == nil {
 			a.client.Root = m.info.Root
 			a.client.Stream = m.info.Stream
+			// Fill in any connection fields that p4 resolved itself (e.g. via
+			// P4CONFIG or environment) but were absent from our config.
+			if a.client.Workspace == "" && m.info.Client != "" {
+				a.client.Workspace = m.info.Client
+			}
+			if a.client.User == "" && m.info.User != "" {
+				a.client.User = m.info.User
+			}
+			if a.client.Port == "" && m.info.ServerAddr != "" {
+				a.client.Port = m.info.ServerAddr
+			}
 			a.statusPane.SetInfo(m.info)
 			var cmds []tea.Cmd
 			cmds = append(cmds, func() tea.Msg { return currentCLFetchedMsg{cl: a.client.CurrentCL()} })

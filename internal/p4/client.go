@@ -636,6 +636,7 @@ func (c *Client) Info() (WorkspaceInfo, error) {
 	r := records[0]
 	return WorkspaceInfo{
 		Client:     r["clientName"],
+		User:       r["userName"],
 		Stream:     r["clientStream"],
 		ServerAddr: r["serverAddress"],
 		Root:       r["clientRoot"],

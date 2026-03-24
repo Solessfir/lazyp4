@@ -86,6 +86,7 @@ type StreamInfo struct {
 // WorkspaceInfo contains basic info from p4 info.
 type WorkspaceInfo struct {
 	Client     string // workspace/client name
+	User       string // p4 user name
 	Stream     string // client stream path (e.g. //depot/main), empty if not stream client
 	ServerAddr string
 	Root       string // local root path of the workspace
