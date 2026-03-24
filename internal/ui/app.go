@@ -1163,28 +1163,6 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = "reveal error: " + err.Error()
 		}
 		return a, nil
-	case "F":
-		path := ""
-		switch a.active {
-		case paneBrowser:
-			path = a.browserPane.SelectedPath()
-		case paneFileList:
-			if a.fileList.IsOnCLHeader() {
-				a.status = "Force sync applies to files and folders - navigate to a file or folder"
-				return a, nil
-			}
-			if f := a.fileList.SelectedFile(); f != nil {
-				path = f.DepotFile
-			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
-				path = dp
-			}
-		}
-		if path == "" {
-			a.status = "No file or folder selected for force sync"
-			return a, nil
-		}
-		a.status = "Force syncing " + path + "..."
-		return a, a.cmdForceSync(path)
 	case "u":
 		if a.active == paneShelved {
 			clID := a.shelvedPane.SelectedCL()
@@ -1276,6 +1254,17 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.status = "Calculating sync..."
 		return a, a.cmdSyncDryRun()
+	case "P":
+		if a.active != paneBrowser {
+			return a, nil
+		}
+		path := a.browserPane.SelectedPath()
+		if path == "" {
+			a.status = "No file or folder selected for force sync"
+			return a, nil
+		}
+		a.status = "Force syncing " + path + "..."
+		return a, a.cmdForceSync(path)
 	case "s":
 		if a.opRunning {
 			a.status = a.opName + " in progress"
@@ -2318,7 +2307,7 @@ func (a *App) helpContent() string {
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
-			{k: "F", desc: "Force sync selected file or folder"},
+			{k: "P", desc: "Force sync selected file or folder"},
 		}
 		if sel := a.browserPane.SelectedEntry(); sel != nil {
 			if sel.LocalPath != "" {
