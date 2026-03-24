@@ -19,7 +19,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Mark individual files for partial submit
 - Shelve and unshelve changelists (including cross-stream via `-S`)
 - Stream depot support — stream browser, stream switching, merge/copy integration
-- Fetch (dry-run sync) — see how many files are pending before committing to a sync
+- Fetch (dry-run sync) — see how many CLs are pending before committing to a sync
 - Reconcile offline changes (`p4 reconcile` + `p4 edit` fallback)
 - Discard added files with optional local delete (`dd`)
 - Skip discard confirmation for files with no local changes
@@ -78,6 +78,9 @@ store_password = false           # Cache password in system keyring
 [ui]
 theme          = "dark"          # "dark" or "light"
 fetch_interval = "10m"           # Background refresh interval (empty = disabled)
+
+[linux]
+file_manager = ""                # File manager for `o` key (e.g. "nemo"). Auto-detected if empty.
 ```
 
 ## Keybindings
@@ -112,6 +115,7 @@ Press `?` inside the app for context-sensitive help.
 | `/` | Filter / search |
 | `space` | Reconcile file or folder (edit / add / delete) |
 | `d` | Discard (revert) checked-out file |
+| `o` | Reveal in file manager |
 | `D` | Mark for delete |
 | `F` | Force sync selected file or folder |
 
@@ -121,6 +125,7 @@ Press `?` inside the app for context-sensitive help.
 |-----|--------|
 | `space` | Mark / unmark file for partial submit |
 | `enter` | Open file |
+| `o` | Reveal in file manager |
 | `l` / `h` | Expand / collapse folder |
 | `s` | Submit — opens description prompt; uses marked files if any |
 | `e` / `E` | Shelve (with revert) / shelve only |
