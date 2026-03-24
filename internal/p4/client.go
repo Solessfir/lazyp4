@@ -900,9 +900,6 @@ func (c *Client) BrowserWorkspaceFast(depotPath string) (dirs []string, files []
 		return nil, nil, err
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
 		computedDepot := c.Stream + rel + "/" + e.Name()
 		if e.IsDir() {
 			dirs = append(dirs, computedDepot)
