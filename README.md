@@ -115,6 +115,7 @@ Press `?` inside the app for context-sensitive help.
 | `/` | Filter / search |
 | `space` | Reconcile file or folder (edit / add / delete) |
 | `d` | Discard (revert) checked-out file |
+| `u` | Revert unchanged files only (skips files with local changes) |
 | `o` | Reveal in file manager |
 | `P` | Force sync selected file or folder (select root to sync entire workspace) |
 | `D` | Mark for delete |
@@ -131,6 +132,7 @@ Press `?` inside the app for context-sensitive help.
 | `e` / `E` | Shelve (with revert) / shelve only |
 | `m` | Move file(s) to a different CL |
 | `d` | Discard (revert) — skips confirmation if file is unchanged; `dd` to also delete local file for added files |
+| `u` | Revert unchanged files only — works on selected file, marked files, or entire CL |
 | `R` | Show conflicts (scoped to file or folder) |
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
