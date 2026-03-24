@@ -116,8 +116,8 @@ Press `?` inside the app for context-sensitive help.
 | `space` | Reconcile file or folder (edit / add / delete) |
 | `d` | Discard (revert) checked-out file |
 | `o` | Reveal in file manager |
+| `P` | Force sync selected file or folder (select root to sync entire workspace) |
 | `D` | Mark for delete |
-| `F` | Force sync selected file or folder |
 
 ### Pending pane
 
