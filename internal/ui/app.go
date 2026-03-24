@@ -614,6 +614,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.cmdLog.Add(m.cmd, m.result)
 		return a, nil
 
+	case submitReadyMsg:
+		if len(m.files) == 0 {
+			a.opRunning = false
+			a.status = "Nothing to submit — all files were unchanged"
+			return a, nil
+		}
+		return a, a.cmdSubmitMarkedStart(m.files, m.description)
+
 	case syncDryDoneMsg:
 		if m.err != nil {
 			a.opRunning = false
@@ -1716,7 +1724,7 @@ func (a *App) execSubmit() tea.Cmd {
 		desc = "lazyp4 submit"
 	}
 	if len(m.files) > 0 {
-		return a.cmdSubmitMarkedStart(m.files, desc)
+		return a.cmdSubmitMarkedFilter(m.files, desc)
 	}
 	return a.cmdSubmitStart(m.clID, desc)
 }
@@ -3032,10 +3040,36 @@ func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {
 	a.opTotal = 0
 	a.opDone = 0
 	return a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
+		a.client.RevertUnchanged(clID)
 		err := a.client.SubmitStreaming(ctx, clID, description, ch)
 		ch <- opErrLine(err)
 		close(ch)
 	})
+}
+
+type submitReadyMsg struct {
+	files       []p4.OpenedFile
+	description string
+}
+
+func (a *App) cmdSubmitMarkedFilter(files []p4.OpenedFile, description string) tea.Cmd {
+	return func() tea.Msg {
+		var toSubmit []p4.OpenedFile
+		var toRevert []string
+		for _, f := range files {
+			if f.Action == p4.ActionEdit {
+				if changed, err := a.client.HasChanges(f.ClientFile); err != nil || !changed {
+					toRevert = append(toRevert, f.ClientFile)
+					continue
+				}
+			}
+			toSubmit = append(toSubmit, f)
+		}
+		if len(toRevert) > 0 {
+			a.client.RevertFiles(toRevert)
+		}
+		return submitReadyMsg{files: toSubmit, description: description}
+	}
 }
 
 func (a *App) cmdSubmitMarkedStart(files []p4.OpenedFile, description string) tea.Cmd {

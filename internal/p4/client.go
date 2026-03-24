@@ -294,6 +294,12 @@ func (c *Client) RevertFiles(clientFiles []string) (string, error) {
 	return c.run(args...)
 }
 
+// RevertUnchanged reverts all open files in the given CL that are identical to the depot version.
+// Pass "default" for the default CL. Errors are silently ignored (no files to revert is normal).
+func (c *Client) RevertUnchanged(clID string) {
+	c.run("revert", "-a", "-c", clID)
+}
+
 // PendingDescriptions returns a map of CL ID → description for all pending CLs.
 func (c *Client) PendingDescriptions() (map[string]string, error) {
 	args := []string{"changes", "-s", "pending", "-l"}
