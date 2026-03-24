@@ -300,6 +300,14 @@ func (c *Client) RevertUnchanged(clID string) {
 	c.run("revert", "-a", "-c", clID)
 }
 
+// RevertUnchangedPaths reverts the given paths (client files or local paths with wildcards)
+// that are identical to the depot version. Returns an error only on p4 failures.
+func (c *Client) RevertUnchangedPaths(paths []string) error {
+	args := append([]string{"revert", "-a"}, paths...)
+	_, err := c.run(args...)
+	return err
+}
+
 // PendingDescriptions returns a map of CL ID → description for all pending CLs.
 func (c *Client) PendingDescriptions() (map[string]string, error) {
 	args := []string{"changes", "-s", "pending", "-l"}
@@ -796,18 +804,16 @@ func (c *Client) WhereLocal(depotPath string) (string, error) {
 	return fields[2], nil
 }
 
-// Reconcile runs p4 reconcile on the given path to detect offline changes
-// (edit, add, delete). If reconcile finds nothing to open, falls back to
-// p4 edit so the user can check out an unchanged depot file for editing.
-func (c *Client) Reconcile(path string) (string, error) {
-	out, err := c.run("reconcile", path)
-	if err != nil {
-		return out, err
-	}
-	if strings.TrimSpace(out) == "" {
-		return c.run("edit", path)
-	}
-	return out, nil
+// Reconcile runs p4 reconcile on the given local path to detect offline changes
+// (edit, add, delete). Uses -m for mtime-based detection and -f to force
+// re-reconcile already-open files.
+func (c *Client) Reconcile(localPath string) (string, error) {
+	return c.run("reconcile", "-m", "-f", localPath)
+}
+
+// Edit opens the given local path for edit. Accepts wildcards (e.g. /path/...).
+func (c *Client) Edit(localPath string) (string, error) {
+	return c.run("edit", localPath)
 }
 
 // BrowserDirs lists immediate subdirectories at the given wildcard path (e.g. "//depot/stream/*").

@@ -1107,7 +1107,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Block server-dependent operations when offline.
 	if a.offlineMode {
 		switch m.String() {
-		case "p", "s", "e", "E", "d", "u", "D", "F", "f", "m", "R":
+		case "p", "s", "e", "E", "d", "u", "D", "F", "f", "m", "R", "a":
 			a.status = "Offline — p4 server unreachable"
 			return a, nil
 		}
@@ -1199,19 +1199,17 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Pending pane: revert only unchanged (edit action, no local changes).
 		marked := a.fileList.MarkedFiles()
-		var candidates []p4.OpenedFile
 		if len(marked) > 0 {
-			candidates = marked
-		} else if f := a.fileList.SelectedFile(); f != nil {
-			candidates = []p4.OpenedFile{*f}
-		} else if clID := a.fileList.SelectedCL(); clID != "" {
-			candidates = a.fileList.FilesForCL(clID)
+			return a, a.cmdRevertUnchangedFiles(marked)
 		}
-		if len(candidates) == 0 {
-			a.status = "No file selected"
-			return a, nil
+		if f := a.fileList.SelectedFile(); f != nil {
+			return a, a.cmdRevertUnchangedFiles([]p4.OpenedFile{*f})
 		}
-		return a, a.cmdRevertUnchangedFiles(candidates)
+		if clID := a.fileList.SelectedCL(); clID != "" {
+			return a, a.cmdRevertUnchangedCL(clID)
+		}
+		a.status = "No file selected"
+		return a, nil
 	case "d":
 		if a.active == paneShelved {
 			clID := a.shelvedPane.SelectedCL()
@@ -1470,51 +1468,44 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case "u":
 			sel := a.browserPane.SelectedEntry()
-			if sel == nil {
+			if sel == nil || sel.LocalPath == "" {
 				return a, nil
 			}
+			localPath := sel.LocalPath
 			if sel.IsDir {
-				prefix := strings.TrimSuffix(sel.DepotPath, "/...")
-				var candidates []p4.OpenedFile
-				for _, cl := range a.fileList.Changelists() {
-					for _, f := range cl.Files {
-						if f.Action == p4.ActionEdit && strings.HasPrefix(f.DepotFile, prefix+"/") {
-							candidates = append(candidates, f)
-						}
-					}
-				}
-				if len(candidates) == 0 {
-					a.status = "No open files under selected folder"
-					return a, nil
-				}
-				return a, a.cmdRevertUnchangedFiles(candidates)
+				localPath = sel.LocalPath + string(filepath.Separator) + "..."
 			}
-			var found *p4.OpenedFile
-			for _, cl := range a.fileList.Changelists() {
-				for i := range cl.Files {
-					if cl.Files[i].DepotFile == sel.DepotPath {
-						found = &cl.Files[i]
-						break
-					}
-				}
-				if found != nil {
-					break
-				}
-			}
-			if found == nil {
-				return a, nil
-			}
-			return a, a.cmdRevertUnchangedFiles([]p4.OpenedFile{*found})
+			return a, a.cmdRevertUnchangedPath(localPath)
 		case " ":
-			path := a.browserPane.SelectedPath()
-			if path == "" {
-				if root := a.browserPane.RootPath(); root != "" {
-					path = root + "/..."
+			var localPath string
+			if sel := a.browserPane.SelectedEntry(); sel != nil {
+				if sel.IsDir {
+					localPath = sel.LocalPath + string(filepath.Separator) + "..."
+				} else {
+					localPath = sel.LocalPath
 				}
+			} else if a.client.Root != "" {
+				localPath = a.client.Root + string(filepath.Separator) + "..."
 			}
-			if path != "" {
-				a.status = "Reconciling " + path + "..."
-				return a, a.cmdReconcile(path)
+			if localPath != "" {
+				a.status = "Reconciling..."
+				return a, a.cmdReconcile(localPath)
+			}
+			return a, nil
+		case "a":
+			var localPath string
+			if sel := a.browserPane.SelectedEntry(); sel != nil {
+				if sel.IsDir {
+					localPath = sel.LocalPath + string(filepath.Separator) + "..."
+				} else {
+					localPath = sel.LocalPath
+				}
+			} else if a.client.Root != "" {
+				localPath = a.client.Root + string(filepath.Separator) + "..."
+			}
+			if localPath != "" {
+				a.status = "Checking out..."
+				return a, a.cmdEdit(localPath)
 			}
 			return a, nil
 		}
@@ -2149,6 +2140,8 @@ func (a *App) renderHotkeys() string {
 	case paneBrowser:
 		local = []binding{
 			{"Expand", "enter"},
+			{"Reconcile", "space"},
+			{"Checkout", "a"},
 			{"Browser mode", "b"},
 			{"Revert unchanged", "u"},
 		}
@@ -2382,6 +2375,7 @@ func (a *App) helpContent() string {
 			{k: "enter / l", desc: "Expand directory"},
 			{k: "h", desc: "Collapse directory"},
 			{k: "space", desc: "Reconcile file or folder (edit / add / delete)"},
+			{k: "a", desc: "Checkout for edit (p4 edit, supports folders)"},
 			{k: "b", desc: "Toggle Workspace / Depot Browser"},
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
@@ -2728,31 +2722,39 @@ func (a *App) cmdRevertCheck(clientFile string) tea.Cmd {
 	}
 }
 
-// cmdRevertUnchangedFiles checks each edit-action file for local changes and
-// reverts those that are identical to the have revision. Add/delete files are skipped.
+// cmdRevertUnchangedFiles runs p4 revert -a on the client files of the given
+// opened files, letting p4 decide which are actually unchanged.
 func (a *App) cmdRevertUnchangedFiles(files []p4.OpenedFile) tea.Cmd {
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.ClientFile
+	}
+	sourceCLs := a.sourceCLsForClientFiles(paths)
 	return func() tea.Msg {
-		var toRevert []string
-		for _, f := range files {
-			if f.Action != p4.ActionEdit {
-				continue
-			}
-			if changed, err := a.client.HasChanges(f.ClientFile); err != nil || changed {
-				continue
-			}
-			toRevert = append(toRevert, f.ClientFile)
-		}
-		if len(toRevert) == 0 {
-			return opDoneMsg{"No unchanged files to revert", "", ""}
-		}
-		sourceCLs := a.sourceCLsForClientFiles(toRevert)
-		if _, err := a.client.RevertFiles(toRevert); err != nil {
-			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
+		if err := a.client.RevertUnchangedPaths(paths); err != nil {
+			return opDoneMsg{"revert unchanged failed: " + err.Error(), "p4 revert -a", "error: " + err.Error()}
 		}
 		for _, cl := range sourceCLs {
 			_ = a.client.DeleteChange(cl)
 		}
-		return revertDoneMsg{files: toRevert}
+		return revertDoneMsg{files: paths}
+	}
+}
+
+// cmdRevertUnchangedPath runs p4 revert -a on a local path (supports wildcards).
+func (a *App) cmdRevertUnchangedPath(localPath string) tea.Cmd {
+	return func() tea.Msg {
+		if err := a.client.RevertUnchangedPaths([]string{localPath}); err != nil {
+			return opDoneMsg{"revert unchanged failed: " + err.Error(), "p4 revert -a", "error: " + err.Error()}
+		}
+		return revertDoneMsg{}
+	}
+}
+
+func (a *App) cmdRevertUnchangedCL(clID string) tea.Cmd {
+	return func() tea.Msg {
+		a.client.RevertUnchanged(clID)
+		return revertDoneMsg{}
 	}
 }
 
@@ -2859,6 +2861,13 @@ func (a *App) cmdReconcile(path string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := a.client.Reconcile(path)
 		return reconcileDoneMsg{path: path, err: err}
+	}
+}
+
+func (a *App) cmdEdit(localPath string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := a.client.Edit(localPath)
+		return reconcileDoneMsg{path: localPath, err: err}
 	}
 }
 
