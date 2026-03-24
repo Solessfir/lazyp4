@@ -1467,45 +1467,20 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		case "u":
-			sel := a.browserPane.SelectedEntry()
-			if sel == nil || sel.LocalPath == "" {
-				return a, nil
+			if lp := a.browserLocalPath(); lp != "" {
+				return a, a.cmdRevertUnchangedPath(lp)
 			}
-			localPath := sel.LocalPath
-			if sel.IsDir {
-				localPath = sel.LocalPath + string(filepath.Separator) + "..."
-			}
-			return a, a.cmdRevertUnchangedPath(localPath)
+			return a, nil
 		case " ":
-			var localPath string
-			if sel := a.browserPane.SelectedEntry(); sel != nil {
-				if sel.IsDir {
-					localPath = sel.LocalPath + string(filepath.Separator) + "..."
-				} else {
-					localPath = sel.LocalPath
-				}
-			} else if a.client.Root != "" {
-				localPath = a.client.Root + string(filepath.Separator) + "..."
-			}
-			if localPath != "" {
+			if lp := a.browserLocalPath(); lp != "" {
 				a.status = "Reconciling..."
-				return a, a.cmdReconcile(localPath)
+				return a, a.cmdReconcile(lp)
 			}
 			return a, nil
 		case "a":
-			var localPath string
-			if sel := a.browserPane.SelectedEntry(); sel != nil {
-				if sel.IsDir {
-					localPath = sel.LocalPath + string(filepath.Separator) + "..."
-				} else {
-					localPath = sel.LocalPath
-				}
-			} else if a.client.Root != "" {
-				localPath = a.client.Root + string(filepath.Separator) + "..."
-			}
-			if localPath != "" {
+			if lp := a.browserLocalPath(); lp != "" {
 				a.status = "Checking out..."
-				return a, a.cmdEdit(localPath)
+				return a, a.cmdEdit(lp)
 			}
 			return a, nil
 		}
@@ -2855,6 +2830,24 @@ func (a *App) cmdOpenFile(depotPath string) tea.Cmd {
 		}
 		return openFileDoneMsg{}
 	}
+}
+
+// browserLocalPath returns the local filesystem path for the currently selected
+// browser entry, appending /... for directories. Falls back to the workspace
+// root with /... if nothing is selected. Returns "" if no local path is available.
+func (a *App) browserLocalPath() string {
+	if sel := a.browserPane.SelectedEntry(); sel != nil {
+		if sel.LocalPath != "" {
+			if sel.IsDir {
+				return sel.LocalPath + string(filepath.Separator) + "..."
+			}
+			return sel.LocalPath
+		}
+	}
+	if a.client.Root != "" {
+		return a.client.Root + string(filepath.Separator) + "..."
+	}
+	return ""
 }
 
 func (a *App) cmdReconcile(path string) tea.Cmd {
