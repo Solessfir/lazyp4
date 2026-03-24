@@ -1,6 +1,7 @@
 package panes
 
 import (
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -594,6 +595,13 @@ func (p *BrowserPane) rebuild() {
 func (p *BrowserPane) flattenNode(node *browserNode, depth int) {
 	p.rows = append(p.rows, browserRow{node: node, depth: depth})
 	if node.isDir && node.expanded {
+		sort.Slice(node.children, func(i, j int) bool {
+			ci, cj := node.children[i], node.children[j]
+			if ci.isDir != cj.isDir {
+				return ci.isDir
+			}
+			return strings.ToLower(ci.name) < strings.ToLower(cj.name)
+		})
 		for _, c := range node.children {
 			p.flattenNode(c, depth+1)
 		}
