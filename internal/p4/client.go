@@ -416,7 +416,11 @@ func (c *Client) SubmitMarked(files []OpenedFile, description string) error {
 
 // CurrentCL returns the highest CL currently synced in the workspace (have revision).
 func (c *Client) CurrentCL() string {
-	out, err := c.run("changes", "-m1", "-s", "submitted", "//...@"+c.Workspace)
+	scope := "//..."
+	if c.Stream != "" {
+		scope = c.Stream + "/..."
+	}
+	out, err := c.run("changes", "-m1", "-s", "submitted", scope+"@"+c.Workspace)
 	if err != nil || strings.TrimSpace(out) == "" {
 		return ""
 	}
@@ -1035,7 +1039,11 @@ func (c *Client) SyncDryRun() (int, error) {
 	if haveCL == "" {
 		return 0, nil
 	}
-	out, err := c.run("changes", "-s", "submitted", fmt.Sprintf("//...@%s,#head", haveCL))
+	scope := "//..."
+	if c.Stream != "" {
+		scope = c.Stream + "/..."
+	}
+	out, err := c.run("changes", "-s", "submitted", fmt.Sprintf("%s@%s,#head", scope, haveCL))
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no such file") {
