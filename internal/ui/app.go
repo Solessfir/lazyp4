@@ -3059,7 +3059,8 @@ func revealInExplorer(localPath, fileManager string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("explorer", "/select,"+localPath)
+		winPath := filepath.FromSlash(localPath)
+		cmd = exec.Command("cmd", "/c", fmt.Sprintf(`explorer /select,"%s"`, winPath))
 	case "darwin":
 		cmd = exec.Command("open", "-R", localPath)
 	default:
