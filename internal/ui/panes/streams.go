@@ -94,8 +94,20 @@ func (p *StreamsPane) SetCursor(idx int) {
 
 // Update handles j/k navigation.
 func (p *StreamsPane) Update(msg tea.Msg) tea.Cmd {
-	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
+	switch m := msg.(type) {
+	case tea.MouseMsg:
+		switch m.Button {
+		case tea.MouseButtonWheelUp:
+			if p.cursor > 0 {
+				p.cursor--
+			}
+		case tea.MouseButtonWheelDown:
+			if p.cursor < len(p.visiblePaths)-1 {
+				p.cursor++
+			}
+		}
+	case tea.KeyMsg:
+		switch m.String() {
 		case "j", "down":
 			if p.cursor < len(p.visiblePaths)-1 {
 				p.cursor++

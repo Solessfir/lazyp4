@@ -1013,6 +1013,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd = a.browserPane.Update(m)
 			case paneFileList:
 				cmd = a.fileList.Update(m)
+			case paneStreams:
+				cmd = a.streamsPane.Update(m)
 			case paneShelved:
 				cmd = a.shelvedPane.Update(m)
 			case paneLog:

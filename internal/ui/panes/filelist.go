@@ -473,6 +473,26 @@ func (p *FileListPane) Init() tea.Cmd { return nil }
 // Update handles keyboard navigation within the pane.
 func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
+	case tea.MouseMsg:
+		switch m.Button {
+		case tea.MouseButtonWheelUp:
+			if p.filter != "" {
+				if p.filterCursor > 0 {
+					p.filterCursor--
+				}
+			} else if p.cursor > 0 {
+				p.cursor--
+			}
+		case tea.MouseButtonWheelDown:
+			if p.filter != "" {
+				if p.filterCursor < len(p.filteredIdxs)-1 {
+					p.filterCursor++
+				}
+			} else if p.cursor < len(p.rows)-1 {
+				p.cursor++
+			}
+		}
+		return nil
 	case tea.KeyMsg:
 		if p.filterMode {
 			switch m.String() {

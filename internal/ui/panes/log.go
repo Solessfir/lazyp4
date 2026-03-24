@@ -121,6 +121,23 @@ func (p *LogPane) Init() tea.Cmd { return nil }
 // Update handles j/k cursor movement and viewport scrolling.
 func (p *LogPane) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
+	case tea.MouseMsg:
+		switch m.Button {
+		case tea.MouseButtonWheelUp:
+			if p.cursor > 0 {
+				p.cursor--
+				p.rerender()
+				p.scrollToCursor()
+			}
+			return nil
+		case tea.MouseButtonWheelDown:
+			if p.cursor < len(p.entries)-1 {
+				p.cursor++
+				p.rerender()
+				p.scrollToCursor()
+			}
+			return nil
+		}
 	case tea.KeyMsg:
 		switch m.String() {
 		case "j", "down":
