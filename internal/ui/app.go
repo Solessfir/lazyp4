@@ -1124,13 +1124,15 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.integrateModal = newIntegrateModalClassic()
 			return a, textinput.Blink
 		}
+		if a.active != paneStreams {
+			return a, nil
+		}
 		if parent := a.currentStreamParent(); parent != "" {
 			a.integrateModal = newIntegrateModalStream(parent)
 			return a, nil
 		}
 		a.status = "Current stream has no parent to integrate with"
 		return a, nil
-		// stream depot: fall through to pane-specific handler below
 	case "r":
 		a.status = "Refreshing..."
 		cmds := []tea.Cmd{a.refresh()}
@@ -1187,7 +1189,29 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, a.cmdUnshelveAndDelete(clID)
 		}
-		return a, nil
+		if a.active == paneBrowser {
+			// handled in the pane-specific section below
+			break
+		}
+		if a.opRunning {
+			a.status = a.opName + " in progress"
+			return a, nil
+		}
+		// Pending pane: revert only unchanged (edit action, no local changes).
+		marked := a.fileList.MarkedFiles()
+		var candidates []p4.OpenedFile
+		if len(marked) > 0 {
+			candidates = marked
+		} else if f := a.fileList.SelectedFile(); f != nil {
+			candidates = []p4.OpenedFile{*f}
+		} else if clID := a.fileList.SelectedCL(); clID != "" {
+			candidates = a.fileList.FilesForCL(clID)
+		}
+		if len(candidates) == 0 {
+			a.status = "No file selected"
+			return a, nil
+		}
+		return a, a.cmdRevertUnchangedFiles(candidates)
 	case "d":
 		if a.active == paneShelved {
 			clID := a.shelvedPane.SelectedCL()
@@ -1444,6 +1468,43 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return a, nil
+		case "u":
+			sel := a.browserPane.SelectedEntry()
+			if sel == nil {
+				return a, nil
+			}
+			if sel.IsDir {
+				prefix := strings.TrimSuffix(sel.DepotPath, "/...")
+				var candidates []p4.OpenedFile
+				for _, cl := range a.fileList.Changelists() {
+					for _, f := range cl.Files {
+						if f.Action == p4.ActionEdit && strings.HasPrefix(f.DepotFile, prefix+"/") {
+							candidates = append(candidates, f)
+						}
+					}
+				}
+				if len(candidates) == 0 {
+					a.status = "No open files under selected folder"
+					return a, nil
+				}
+				return a, a.cmdRevertUnchangedFiles(candidates)
+			}
+			var found *p4.OpenedFile
+			for _, cl := range a.fileList.Changelists() {
+				for i := range cl.Files {
+					if cl.Files[i].DepotFile == sel.DepotPath {
+						found = &cl.Files[i]
+						break
+					}
+				}
+				if found != nil {
+					break
+				}
+			}
+			if found == nil {
+				return a, nil
+			}
+			return a, a.cmdRevertUnchangedFiles([]p4.OpenedFile{*found})
 		case " ":
 			path := a.browserPane.SelectedPath()
 			if path == "" {
@@ -2089,6 +2150,7 @@ func (a *App) renderHotkeys() string {
 		local = []binding{
 			{"Expand", "enter"},
 			{"Browser mode", "b"},
+			{"Revert unchanged", "u"},
 		}
 	case paneFileList:
 		if a.fileList.HasFiles() {
@@ -2099,6 +2161,7 @@ func (a *App) renderHotkeys() string {
 			binding{"Shelve", "e"},
 			binding{"Move CL", "m"},
 			binding{"Discard", "d"},
+			binding{"Revert unchanged", "u"},
 			binding{"Conflicts", "R"},
 		)
 	case paneShelved:
@@ -2328,6 +2391,7 @@ func (a *App) helpContent() string {
 			if sel.LocalPath != "" {
 				local = append(local, row{k: "o", desc: "Reveal in file manager"})
 			}
+			local = append(local, row{k: "u", desc: "Revert unchanged files only"})
 			if !sel.IsDir {
 				local = append(local, row{k: "D", desc: "Mark for delete"})
 			}
@@ -2348,6 +2412,7 @@ func (a *App) helpContent() string {
 				{k: "E", desc: "Shelve without reverting"},
 				{k: "m", desc: "Move file(s) to a different CL"},
 				{k: "d", desc: "Discard (revert)"},
+				{k: "u", desc: "Revert unchanged files only"},
 			}, local...)
 		}
 		if a.resolve.HasConflicts() {
@@ -2660,6 +2725,34 @@ func (a *App) cmdRevertCheck(clientFile string) tea.Cmd {
 			hasChanges = true
 		}
 		return revertCheckMsg{clientFile: clientFile, hasChanges: hasChanges}
+	}
+}
+
+// cmdRevertUnchangedFiles checks each edit-action file for local changes and
+// reverts those that are identical to the have revision. Add/delete files are skipped.
+func (a *App) cmdRevertUnchangedFiles(files []p4.OpenedFile) tea.Cmd {
+	return func() tea.Msg {
+		var toRevert []string
+		for _, f := range files {
+			if f.Action != p4.ActionEdit {
+				continue
+			}
+			if changed, err := a.client.HasChanges(f.ClientFile); err != nil || changed {
+				continue
+			}
+			toRevert = append(toRevert, f.ClientFile)
+		}
+		if len(toRevert) == 0 {
+			return opDoneMsg{"No unchanged files to revert", "", ""}
+		}
+		sourceCLs := a.sourceCLsForClientFiles(toRevert)
+		if _, err := a.client.RevertFiles(toRevert); err != nil {
+			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
+		}
+		for _, cl := range sourceCLs {
+			_ = a.client.DeleteChange(cl)
+		}
+		return revertDoneMsg{files: toRevert}
 	}
 }
 
