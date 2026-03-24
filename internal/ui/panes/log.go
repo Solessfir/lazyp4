@@ -23,6 +23,7 @@ type LogPane struct {
 	innerW       int    // width - 2, used for word-wrap
 	titleNum     string // section number shown in header, e.g. "5"
 	titleName    string // section name shown in header, e.g. "History"
+	currentCL    string // CL the workspace is currently synced to
 }
 
 var (
@@ -54,7 +55,7 @@ func (p *LogPane) SetSize(w, h int) {
 	p.viewport.Width = innerW
 	p.viewport.Height = innerH
 	if len(p.entries) > 0 {
-		content, offsets := buildLogContent(p.entries, p.cursor, innerW, p.focused)
+		content, offsets := buildLogContent(p.entries, p.cursor, innerW, p.focused, p.currentCL)
 		p.entryOffsets = offsets
 		p.viewport.SetContent(content)
 	}
@@ -94,6 +95,12 @@ func (p *LogPane) SelectedChange() string {
 	return p.entries[p.cursor].Change
 }
 
+// SetCurrentCL sets the CL the workspace is currently synced to, for `*` marking.
+func (p *LogPane) SetCurrentCL(cl string) {
+	p.currentCL = cl
+	p.rerender()
+}
+
 // SetEntries replaces the displayed log entries and resets the cursor.
 func (p *LogPane) SetEntries(entries []p4.FilelogEntry) {
 	p.entries = entries
@@ -102,7 +109,7 @@ func (p *LogPane) SetEntries(entries []p4.FilelogEntry) {
 	if w <= 0 {
 		w = p.viewport.Width
 	}
-	content, offsets := buildLogContent(entries, p.cursor, w, p.focused)
+	content, offsets := buildLogContent(entries, p.cursor, w, p.focused, p.currentCL)
 	p.entryOffsets = offsets
 	p.viewport.SetContent(content)
 	p.viewport.GotoTop()
@@ -160,7 +167,7 @@ func (p *LogPane) rerender() {
 	if w <= 0 {
 		w = p.viewport.Width
 	}
-	content, offsets := buildLogContent(p.entries, p.cursor, w, p.focused)
+	content, offsets := buildLogContent(p.entries, p.cursor, w, p.focused, p.currentCL)
 	p.entryOffsets = offsets
 	p.viewport.SetContent(content)
 }
@@ -179,7 +186,7 @@ func (p *LogPane) scrollToCursor() {
 
 // buildLogContent renders all entries and returns the content string plus
 // a slice of viewport line offsets (one per entry) for cursor scrolling.
-func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool) (string, []int) {
+func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool, currentCL string) (string, []int) {
 	if len(entries) == 0 {
 		return styleLogMeta.Render("No history"), nil
 	}
@@ -206,10 +213,14 @@ func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool)
 		} else {
 			suffix = fmt.Sprintf("  %s  %s", e.Client, datePart)
 		}
+		marker := "  "
+		if e.Change == currentCL {
+			marker = "* "
+		}
 		if i == cursor && focused {
-			sb.WriteString(styleCursor.Render("CL " + e.Change + suffix))
+			sb.WriteString(styleCursor.Render(marker + "CL " + e.Change + suffix))
 		} else {
-			sb.WriteString(styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix))
+			sb.WriteString(styleLogCLNum.Render(marker) + styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix))
 		}
 		sb.WriteByte('\n')
 		line++

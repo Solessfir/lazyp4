@@ -195,6 +195,8 @@ type infoFetchedMsg struct {
 	err  error
 }
 
+type currentCLFetchedMsg struct{ cl string }
+
 type streamsFetchedMsg struct {
 	streams []p4.StreamInfo
 	err     error
@@ -728,6 +730,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.cmdLoadShelved()
 
+	case currentCLFetchedMsg:
+		a.log.SetCurrentCL(m.cl)
+		return a, nil
+
 	case infoFetchedMsg:
 		if m.err != nil && p4.IsConnectionError(m.err) {
 			a.setOffline(true)
@@ -738,6 +744,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.client.Stream = m.info.Stream
 			a.statusPane.SetInfo(m.info)
 			var cmds []tea.Cmd
+			cmds = append(cmds, func() tea.Msg { return currentCLFetchedMsg{cl: a.client.CurrentCL()} })
 			if m.info.Stream != "" {
 				a.isStreamDepot = true
 				cmds = append(cmds, a.cmdStreams(m.info.Stream))
