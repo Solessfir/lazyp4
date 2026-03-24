@@ -114,6 +114,7 @@ Press `?` inside the app for context-sensitive help.
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
 | `space` | Reconcile file or folder (edit / add / delete) |
+| `a` | Checkout for edit — works on files and folders (recursive) |
 | `d` | Discard (revert) checked-out file |
 | `u` | Revert unchanged files only (skips files with local changes) |
 | `o` | Reveal in file manager |
