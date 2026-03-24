@@ -1029,9 +1029,9 @@ func (c *Client) IntegrateClassic(source, target string) (string, error) {
 	return c.run("integrate", source, target)
 }
 
-// SyncDryRun runs p4 sync -n and returns the number of files that would be updated.
+// SyncDryRun returns the number of changelists the workspace is behind head.
 func (c *Client) SyncDryRun() (int, error) {
-	out, err := c.run("sync", "-n")
+	out, err := c.run("changes", "-s", "submitted", "//...@have,#head")
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no such file") {
@@ -1044,6 +1044,10 @@ func (c *Client) SyncDryRun() (int, error) {
 		if line != "" {
 			count++
 		}
+	}
+	// subtract 1 to exclude the have CL itself
+	if count > 0 {
+		count--
 	}
 	return count, nil
 }

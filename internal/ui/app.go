@@ -782,8 +782,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.setOffline(false)
 			a.statusPane.SetPending(m.count)
-			a.status = fmt.Sprintf("Fetch: %d file(s) pending", m.count)
-			a.cmdLog.Add("p4 sync -n", fmt.Sprintf("↓%d pending", m.count))
+			a.status = fmt.Sprintf("Fetch: %d CL(s) behind", m.count)
+			a.cmdLog.Add("p4 changes", fmt.Sprintf("↓%d CLs behind", m.count))
 		}
 		return a, nil
 
