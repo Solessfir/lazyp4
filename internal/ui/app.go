@@ -2856,6 +2856,16 @@ func (a *App) browserLocalPath() string {
 			}
 			return sel.LocalPath
 		}
+		// Directory nodes don't carry a LocalPath; derive it from the depot path
+		// using the stream-to-root mapping (workspace mode only).
+		// Note: SelectedEntry appends "/..." to directory depot paths, so strip it first.
+		if sel.IsDir && a.client.Stream != "" && a.client.Root != "" {
+			nodePath := strings.TrimSuffix(sel.DepotPath, "/...")
+			if strings.HasPrefix(nodePath, a.client.Stream) {
+				rel := strings.TrimPrefix(nodePath, a.client.Stream)
+				return a.client.Root + rel + string(filepath.Separator) + "..."
+			}
+		}
 	}
 	if a.client.Root != "" {
 		return a.client.Root + string(filepath.Separator) + "..."
