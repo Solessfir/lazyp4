@@ -1042,18 +1042,9 @@ func (c *Client) IntegrateClassic(source, target string) (string, error) {
 	return c.run("integrate", source, target)
 }
 
-// SyncDryRun returns the number of changelists the workspace is behind head.
+// SyncDryRun returns the number of files that would be updated by a sync to head.
 func (c *Client) SyncDryRun() (int, error) {
-	// Get the have CL as a number first to avoid per-file revision ambiguity.
-	haveCL := c.CurrentCL()
-	if haveCL == "" {
-		return 0, nil
-	}
-	scope := "//..."
-	if c.Stream != "" {
-		scope = c.Stream + "/..."
-	}
-	out, err := c.run("changes", "-s", "submitted", fmt.Sprintf("%s@%s,#head", scope, haveCL))
+	out, err := c.run(append(c.globalFlags(), "sync", "-n")...)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no such file") {
@@ -1066,10 +1057,6 @@ func (c *Client) SyncDryRun() (int, error) {
 		if line != "" {
 			count++
 		}
-	}
-	// subtract 1 to exclude the have CL itself
-	if count > 0 {
-		count--
 	}
 	return count, nil
 }
