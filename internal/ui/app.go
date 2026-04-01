@@ -2083,7 +2083,7 @@ var (
 func (a *App) renderProgressBar() string {
 	const barWidth = 20
 	var filled int
-	if a.opTotal > 0 {
+	if a.opName != "Syncing" && a.opTotal > 0 {
 		filled = a.opDone * barWidth / a.opTotal
 		if filled > barWidth {
 			filled = barWidth
@@ -2095,6 +2095,8 @@ func (a *App) renderProgressBar() string {
 	var count string
 	if a.opTotal == 0 {
 		count = styleHotkeys.Render("Calculating...")
+	} else if a.opName == "Syncing" {
+		count = styleHotkeys.Render(fmt.Sprintf("%d files", a.opDone))
 	} else {
 		count = styleHotkeys.Render(fmt.Sprintf("%d/%d files", a.opDone, a.opTotal))
 	}
