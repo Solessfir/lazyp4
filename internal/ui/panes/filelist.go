@@ -848,7 +848,11 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 			}
 			name := r.label
 			if p.mode == ViewFlat {
-				name = shortName(f.DepotFile, innerW-len(actionTag)-2)
+				if idx := strings.LastIndex(f.DepotFile, "/"); idx >= 0 {
+					name = f.DepotFile[idx+1:]
+				} else {
+					name = f.DepotFile
+				}
 			}
 			marker := "  "
 			if p.marked[f.DepotFile] {

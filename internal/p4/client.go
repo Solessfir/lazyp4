@@ -232,6 +232,14 @@ func (c *Client) Submit(clID, description string) (string, error) {
 
 // SubmitStreaming submits a changelist and streams output lines into lines.
 func (c *Client) SubmitStreaming(ctx context.Context, clID, description string, lines chan<- string) error {
+	if clID == "" || clID == "default" {
+		args := c.globalFlags()
+		args = append(args, "submit")
+		if description != "" {
+			args = append(args, "-d", description)
+		}
+		return c.streamCommand(ctx, lines, args...)
+	}
 	if description != "" {
 		if err := c.UpdateChangeDescription(clID, description); err != nil {
 			return fmt.Errorf("update description: %w", err)
@@ -1014,6 +1022,17 @@ func (c *Client) FilesDiffStatus() map[string]bool {
 			}
 		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
 			changed[currentDepot] = true
+		} else if strings.HasPrefix(line, "==== ") && strings.Contains(line, "(binary)") {
+			// binary file diff: ==== //depot/path#rev (binary) ====
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				depot := parts[1]
+				if idx := strings.Index(depot, "#"); idx > 0 {
+					depot = depot[:idx]
+				}
+				changed[depot] = true
+				currentDepot = ""
+			}
 		}
 	}
 	return changed

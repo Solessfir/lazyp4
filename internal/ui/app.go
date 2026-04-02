@@ -810,8 +810,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.setOffline(false)
 			a.statusPane.SetPending(m.count)
-			a.status = fmt.Sprintf("Fetch: %d CL(s) behind", m.count)
-			a.cmdLog.Add("p4 changes", fmt.Sprintf("↓%d CLs behind", m.count))
+			if m.count == 0 {
+				a.status = "Up to date"
+				a.cmdLog.Add("p4 changes", "up to date")
+			} else {
+				a.status = fmt.Sprintf("Fetch: %d CL(s) behind", m.count)
+				a.cmdLog.Add("p4 changes", fmt.Sprintf("↓%d CLs behind", m.count))
+			}
 		}
 		return a, nil
 
@@ -911,12 +916,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.refresh()
 
 	case reconcileDoneMsg:
+		logPath := filepath.ToSlash(m.path)
 		if m.err != nil {
 			a.status = "reconcile failed: " + m.err.Error()
-			a.cmdLog.Add("p4 reconcile "+m.path, "error: "+m.err.Error())
+			a.cmdLog.Add("p4 reconcile "+logPath, "error: "+m.err.Error())
 		} else {
 			a.status = "Reconcile complete: " + m.path
-			a.cmdLog.Add("p4 reconcile "+m.path, "done")
+			a.cmdLog.Add("p4 reconcile "+logPath, "done")
 		}
 		return a, a.refresh()
 
