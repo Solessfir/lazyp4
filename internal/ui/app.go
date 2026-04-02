@@ -2884,6 +2884,9 @@ func (a *App) browserLocalPath() string {
 func (a *App) cmdReconcile(path string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := a.client.Reconcile(path)
+		if err == nil {
+			a.client.RestoreReadOnly(path)
+		}
 		return reconcileDoneMsg{path: path, err: err}
 	}
 }

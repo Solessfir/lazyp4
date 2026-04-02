@@ -820,6 +820,107 @@ func (c *Client) Reconcile(localPath string) (string, error) {
 	return c.run("reconcile", "-m", "-f", localPath)
 }
 
+// RestoreReadOnly makes tracked-but-unopened files under localWildcard read-only.
+// This corrects permissions after offline file replacement (e.g. copying a folder
+// from outside the workspace). A no-op if the workspace uses the allwrite option.
+func (c *Client) RestoreReadOnly(localWildcard string) error {
+	if allwrite, err := c.isAllWrite(); err != nil || allwrite {
+		return err
+	}
+	localPaths, depotPaths, err := c.haveLocalPaths(localWildcard)
+	if err != nil {
+		return err
+	}
+	opened, err := c.openedDepotPaths(localWildcard)
+	if err != nil {
+		return err
+	}
+	for i, depot := range depotPaths {
+		if opened[depot] {
+			continue
+		}
+		info, err := os.Stat(localPaths[i])
+		if err != nil {
+			continue
+		}
+		os.Chmod(localPaths[i], info.Mode()&^0222)
+	}
+	return nil
+}
+
+func (c *Client) isAllWrite() (bool, error) {
+	if c.Workspace == "" {
+		return false, nil
+	}
+	out, err := c.run("client", "-o", c.Workspace)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Options:") {
+			for _, opt := range strings.Fields(strings.TrimPrefix(line, "Options:")) {
+				if opt == "allwrite" {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Client) haveLocalPaths(localWildcard string) (localPaths, depotPaths []string, err error) {
+	out, runErr := c.run("have", localWildcard)
+	if runErr != nil {
+		msg := runErr.Error()
+		if strings.Contains(msg, "not on client") || strings.Contains(msg, "no such file") {
+			return nil, nil, nil
+		}
+		return nil, nil, runErr
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		// format: //depot/path#rev - /local/path
+		idx := strings.Index(line, " - ")
+		if idx < 0 {
+			continue
+		}
+		depotRev := line[:idx]
+		local := line[idx+3:]
+		depot := depotRev
+		if h := strings.Index(depotRev, "#"); h > 0 {
+			depot = depotRev[:h]
+		}
+		localPaths = append(localPaths, local)
+		depotPaths = append(depotPaths, depot)
+	}
+	return
+}
+
+func (c *Client) openedDepotPaths(localWildcard string) (map[string]bool, error) {
+	out, err := c.run("opened", localWildcard)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not opened") || strings.Contains(msg, "no file") {
+			return map[string]bool{}, nil
+		}
+		return nil, err
+	}
+	opened := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		// format: //depot/path#head - action change (type)
+		if h := strings.Index(line, "#"); h > 0 {
+			opened[line[:h]] = true
+		}
+	}
+	return opened, nil
+}
+
 // Edit opens the given local path for edit. Accepts wildcards (e.g. /path/...).
 func (c *Client) Edit(localPath string) (string, error) {
 	return c.run("edit", localPath)
