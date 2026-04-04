@@ -2885,7 +2885,8 @@ func (a *App) cmdReconcile(path string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := a.client.Reconcile(path)
 		if err == nil {
-			a.client.RestoreReadOnly(path)
+			count, roErr := a.client.RestoreReadOnly(path)
+			a.cmdLog.Add("p4 restore-readonly", fmt.Sprintf("path=%s count=%d err=%v", path, count, roErr))
 		}
 		return reconcileDoneMsg{path: path, err: err}
 	}

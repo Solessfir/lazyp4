@@ -823,18 +823,22 @@ func (c *Client) Reconcile(localPath string) (string, error) {
 // RestoreReadOnly makes tracked-but-unopened files under localWildcard read-only.
 // This corrects permissions after offline file replacement (e.g. copying a folder
 // from outside the workspace). A no-op if the workspace uses the allwrite option.
-func (c *Client) RestoreReadOnly(localWildcard string) error {
-	if allwrite, err := c.isAllWrite(); err != nil || allwrite {
-		return err
+// Returns the count of files made read-only (-1 = allwrite skip, -2 = have error, -3 = opened error).
+func (c *Client) RestoreReadOnly(localWildcard string) (int, error) {
+	if allwrite, err := c.isAllWrite(); err != nil {
+		return -1, fmt.Errorf("isAllWrite: %w", err)
+	} else if allwrite {
+		return -1, nil
 	}
 	localPaths, depotPaths, err := c.haveLocalPaths(localWildcard)
 	if err != nil {
-		return err
+		return -2, fmt.Errorf("have(%s): %w", localWildcard, err)
 	}
 	opened, err := c.openedDepotPaths(localWildcard)
 	if err != nil {
-		return err
+		return -3, fmt.Errorf("opened(%s): %w", localWildcard, err)
 	}
+	count := 0
 	for i, depot := range depotPaths {
 		if opened[depot] {
 			continue
@@ -843,9 +847,11 @@ func (c *Client) RestoreReadOnly(localWildcard string) error {
 		if err != nil {
 			continue
 		}
-		os.Chmod(localPaths[i], info.Mode()&^0222)
+		if err := os.Chmod(localPaths[i], info.Mode()&^0222); err == nil {
+			count++
+		}
 	}
-	return nil
+	return count, nil
 }
 
 func (c *Client) isAllWrite() (bool, error) {
