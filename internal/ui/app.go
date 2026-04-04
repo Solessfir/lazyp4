@@ -1024,6 +1024,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if m.Button == tea.MouseButtonWheelUp || m.Button == tea.MouseButtonWheelDown {
+			if hovered := a.paneAt(m.X, m.Y); hovered != a.active {
+				a.active = hovered
+				a.updateFocus()
+			}
 			var cmd tea.Cmd
 			switch a.active {
 			case paneBrowser:
@@ -1873,6 +1877,53 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// paneAt returns which pane contains the given screen coordinate.
+func (a *App) paneAt(x, y int) activePane {
+	leftW := a.width / 3
+	contentH := a.height - 1
+	bodyH := contentH - panes.CmdLogHeight
+
+	if y >= bodyH {
+		return paneCmdLog
+	}
+
+	if x < leftW {
+		streamsH := 0
+		if a.showStreams {
+			streamsH = len(a.streams) + 2
+			if streamsH > 10 {
+				streamsH = 10
+			}
+		}
+		shelvedH := a.shelvedPane.PreferredHeight()
+		browserH := (bodyH - panes.StatusHeight) - streamsH - shelvedH
+		if browserH < 3 {
+			browserH = 3
+		}
+		browserTop := panes.StatusHeight
+		browserBottom := browserTop + browserH
+		streamsTop := browserBottom
+		streamsBottom := streamsTop + streamsH
+		switch {
+		case y >= browserTop && y < browserBottom:
+			return paneBrowser
+		case a.showStreams && y >= streamsTop && y < streamsBottom:
+			return paneStreams
+		default:
+			return paneShelved
+		}
+	}
+
+	pendingH := bodyH * 2 / 5
+	if pendingH < 4 {
+		pendingH = 4
+	}
+	if y < pendingH {
+		return paneFileList
+	}
+	return a.currentRightPane()
 }
 
 func (a *App) currentRightPane() activePane {
