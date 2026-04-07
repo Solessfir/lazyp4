@@ -307,6 +307,8 @@ type App struct {
 	isStreamDepot    bool   // false = classic depot (no streams)
 	browserNavTarget string // pending nav-to path after filter clear
 	historyMode      bool   // true = show History pane at bottom-right, false = Diff
+	logPath          string // last path loaded into the history pane
+	logMax           int    // last max passed to cmdFilelogMax (0 = unlimited)
 	offlineMode      bool   // true = p4 server unreachable
 
 	width  int
@@ -671,6 +673,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if opName == "Syncing" {
 			a.statusPane.SetFetching()
 			cmds = append(cmds, a.cmdFetch())
+			if a.logPath != "" {
+				cmds = append(cmds, a.cmdFilelogMax(a.logPath, a.logMax))
+			}
 		}
 		return a, tea.Batch(cmds...)
 
@@ -2668,6 +2673,8 @@ func (a *App) cmdFilelog(depotFile string) tea.Cmd {
 }
 
 func (a *App) cmdFilelogMax(depotFile string, max int) tea.Cmd {
+	a.logPath = depotFile
+	a.logMax = max
 	return func() tea.Msg {
 		var entries []p4.FilelogEntry
 		var err error
