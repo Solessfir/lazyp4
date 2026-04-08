@@ -670,6 +670,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.cmdFetch())
 		}
 		cmds = append(cmds, a.refresh())
+		if opName == "Syncing" || opName == "Submitting" {
+			cmds = append(cmds, a.cmdFetchCurrentCL())
+		}
 		if opName == "Syncing" {
 			a.statusPane.SetFetching()
 			cmds = append(cmds, a.cmdFetch())
@@ -768,7 +771,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.statusPane.SetInfo(m.info)
 			var cmds []tea.Cmd
-			cmds = append(cmds, func() tea.Msg { return currentCLFetchedMsg{cl: a.client.CurrentCL()} })
+			cmds = append(cmds, a.cmdFetchCurrentCL())
 			if m.info.Stream != "" {
 				a.isStreamDepot = true
 				cmds = append(cmds, a.cmdStreams(m.info.Stream))
@@ -2575,6 +2578,12 @@ func (a *App) cmdStreams(streamPath string) tea.Cmd {
 		depotPath := p4.DepotFromStream(streamPath)
 		streams, err := a.client.Streams(depotPath)
 		return streamsFetchedMsg{streams: streams, err: err}
+	}
+}
+
+func (a *App) cmdFetchCurrentCL() tea.Cmd {
+	return func() tea.Msg {
+		return currentCLFetchedMsg{cl: a.client.CurrentCL()}
 	}
 }
 
