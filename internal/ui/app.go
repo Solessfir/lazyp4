@@ -1395,6 +1395,53 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.updateFocus()
 		}
 		return a, nil
+	case "J":
+		switch a.active {
+		case paneBrowser:
+			a.browserPane.JumpBottom()
+		case paneFileList:
+			a.fileList.JumpBottom()
+		case paneLog:
+			a.log.JumpBottom()
+		case paneStreams:
+			a.streamsPane.JumpBottom()
+		}
+		return a, nil
+	case "K":
+		switch a.active {
+		case paneBrowser:
+			a.browserPane.JumpTop()
+		case paneFileList:
+			a.fileList.JumpTop()
+		case paneLog:
+			a.log.JumpTop()
+		case paneStreams:
+			a.streamsPane.JumpTop()
+		}
+		return a, nil
+	case "H":
+		switch a.active {
+		case paneBrowser:
+			a.browserPane.CollapseAll()
+		case paneFileList:
+			a.fileList.CollapseAll()
+		}
+		return a, nil
+	case "L":
+		switch a.active {
+		case paneBrowser:
+			toLoad := a.browserPane.ExpandAll1Level()
+			if len(toLoad) > 0 {
+				cmds := make([]tea.Cmd, len(toLoad))
+				for i, path := range toLoad {
+					cmds[i] = a.cmdBrowserLoad(path, a.browserPane.Mode())
+				}
+				return a, tea.Batch(cmds...)
+			}
+		case paneFileList:
+			a.fileList.ExpandAll()
+		}
+		return a, nil
 	case "right":
 		a.cycleFocusForward()
 		return a, nil
@@ -2505,6 +2552,8 @@ func (a *App) helpContent() string {
 
 	global := []row{
 		{k: "j / k", desc: "Navigate"},
+		{k: "J / K", desc: "Jump to bottom / top"},
+		{k: "H / L", desc: "Collapse all / Expand (browser + pending)"},
 		{k: "g", desc: "Toggle History / Diff pane"},
 		{k: "tab", desc: "Cycle panel focus"},
 		{k: "1–6", desc: "Jump to pane by number"},

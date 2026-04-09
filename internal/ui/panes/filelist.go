@@ -312,6 +312,9 @@ func (p *FileListPane) ClearMarks() {
 // ScrollOffset returns the index of the first visible row (updated each render).
 func (p *FileListPane) ScrollOffset() int { return p.scrollOffset }
 
+func (p *FileListPane) JumpTop() { p.SetCursor(0) }
+func (p *FileListPane) JumpBottom() { p.SetCursor(len(p.rows) - 1) }
+
 // SetCursor moves the cursor to idx, clamped to valid range.
 func (p *FileListPane) SetCursor(idx int) {
 	if idx < 0 {
@@ -687,6 +690,23 @@ func (p *FileListPane) CollapseCurrentOrParent() {
 			return
 		}
 	}
+}
+
+// CollapseAll collapses all expanded dirs and moves cursor to the top.
+func (p *FileListPane) CollapseAll() {
+	for k := range p.expanded {
+		p.expanded[k] = false
+	}
+	p.rebuildRows()
+	p.cursor = 0
+}
+
+// ExpandAll expands all dirs.
+func (p *FileListPane) ExpandAll() {
+	for k := range p.expanded {
+		p.expanded[k] = true
+	}
+	p.rebuildRows()
 }
 
 // buildFilteredIdxs populates p.filteredIdxs with indices of rows matching p.filter.

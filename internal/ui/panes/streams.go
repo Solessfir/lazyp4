@@ -80,6 +80,9 @@ func (p *StreamsPane) SelectedStream() string {
 }
 
 // SetCursor moves the cursor to idx, clamped to valid range.
+func (p *StreamsPane) JumpTop() { p.SetCursor(0) }
+func (p *StreamsPane) JumpBottom() { p.SetCursor(len(p.visiblePaths) - 1) }
+
 func (p *StreamsPane) SetCursor(idx int) {
 	if idx < 0 {
 		idx = 0

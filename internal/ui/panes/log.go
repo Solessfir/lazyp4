@@ -71,6 +71,19 @@ func (p *LogPane) SetFocused(f bool) {
 func (p *LogPane) ScrollOffset() int { return p.viewport.YOffset }
 
 // SetCursorByLine moves the cursor to the entry that contains the given viewport line.
+func (p *LogPane) JumpTop() {
+	p.cursor = 0
+	p.rerender()
+	p.scrollToCursor()
+}
+func (p *LogPane) JumpBottom() {
+	if len(p.entries) > 0 {
+		p.cursor = len(p.entries) - 1
+		p.rerender()
+		p.scrollToCursor()
+	}
+}
+
 func (p *LogPane) SetCursorByLine(line int) {
 	absLine := p.viewport.YOffset + line
 	// Find the last entry whose offset is <= absLine.

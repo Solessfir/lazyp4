@@ -238,6 +238,43 @@ func (p *BrowserPane) SetCursor(idx int) {
 	}
 }
 
+func (p *BrowserPane) JumpTop() { p.SetCursor(0) }
+func (p *BrowserPane) JumpBottom() { p.SetCursor(len(p.rows) - 1) }
+
+func (p *BrowserPane) CollapseAll() {
+	p.collapseNode(p.root)
+	p.rebuild()
+}
+
+func (p *BrowserPane) collapseNode(node *browserNode) {
+	if node == nil {
+		return
+	}
+	node.expanded = false
+	for _, c := range node.children {
+		p.collapseNode(c)
+	}
+}
+
+// ExpandAll1Level expands all loaded dirs currently visible in the tree and returns
+// the paths of unloaded dirs that need to be fetched before they can expand.
+// Each call goes one level deeper — repeated presses progressively expand the tree.
+func (p *BrowserPane) ExpandAll1Level() []string {
+	var toLoad []string
+	for _, row := range p.rows {
+		if !row.node.isDir || row.node.expanded {
+			continue
+		}
+		if row.node.loaded {
+			row.node.expanded = true
+		} else {
+			toLoad = append(toLoad, row.node.path)
+		}
+	}
+	p.rebuild()
+	return toLoad
+}
+
 func (p *BrowserPane) SetSize(w, h int) {
 	p.width = w
 	p.height = h
