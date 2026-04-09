@@ -309,6 +309,7 @@ type App struct {
 	historyMode      bool   // true = show History pane at bottom-right, false = Diff
 	logPath          string // last path loaded into the history pane
 	logMax           int    // last max passed to cmdFilelogMax (0 = unlimited)
+	syncPath         string // depot path used for the current/last sync
 	offlineMode      bool   // true = p4 server unreachable
 
 	width  int
@@ -650,6 +651,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.opCancel = nil
 		a.opCh = nil
 		p4cmd := "p4 " + strings.ToLower(opName)
+		if opName == "Syncing" && a.syncPath != "" {
+			p4cmd = "p4 sync " + a.syncPath
+		}
 		var cmds []tea.Cmd
 		if m.err != nil && m.err != context.Canceled {
 			a.status = opName + " failed: " + m.err.Error()
@@ -662,7 +666,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if opName == "Submitting" {
 				fileCount = opTotal
 			}
-			a.status = fmt.Sprintf("%s complete (%d files)", opName, fileCount)
+			if opName == "Syncing" && a.syncPath != "" {
+				a.status = fmt.Sprintf("Synced %s (%d files)", a.syncPath, fileCount)
+			} else {
+				a.status = fmt.Sprintf("%s complete (%d files)", opName, fileCount)
+			}
 			a.cmdLog.Add(p4cmd, fmt.Sprintf("%d files", fileCount))
 		}
 		if opName == "Submitting" {
@@ -1320,7 +1328,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = a.opName + " already in progress"
 			return a, nil
 		}
-		a.status = "Calculating sync..."
+		syncTarget := "//..."
+		if a.client.Stream != "" {
+			syncTarget = a.client.Stream + "/..."
+		}
+		a.status = "Syncing " + syncTarget + "..."
 		return a, a.cmdSyncDryRun()
 	case "P":
 		if a.active != paneBrowser {
@@ -3106,6 +3118,11 @@ func (a *App) cmdSyncDryRun() tea.Cmd {
 	a.opName = "Syncing"
 	a.opTotal = 0
 	a.opDone = 0
+	if a.client.Stream != "" {
+		a.syncPath = a.client.Stream + "/..."
+	} else {
+		a.syncPath = "//..."
+	}
 	return func() tea.Msg {
 		count, err := a.client.SyncDryRun()
 		return syncDryDoneMsg{total: count, err: err}
