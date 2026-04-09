@@ -1100,12 +1100,13 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 
 // HasChanges returns true if the file opened for edit differs from the have revision.
 // Do NOT use -f here — that compares against depot HEAD, not the synced revision.
+// Works for both text (@@) and binary ("Binary files differ") files.
 func (c *Client) HasChanges(clientFile string) (bool, error) {
 	out, err := c.run("diff", "-du", clientFile)
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(out, "@@"), nil
+	return strings.Contains(out, "@@") || strings.Contains(out, "Binary files differ"), nil
 }
 
 // FilesDiffStatus returns the set of depot paths for open-for-edit files that
@@ -1122,24 +1123,32 @@ func (c *Client) FilesDiffStatus() map[string]bool {
 	var currentDepot string
 	for _, line := range strings.Split(out.String(), "\n") {
 		if strings.HasPrefix(line, "--- //") {
-			// format: --- //depot/path\tdate
+			// text diff header: --- //depot/path\tdate
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
-				currentDepot = parts[1] // //depot/path, no #rev suffix
+				currentDepot = parts[1]
 			}
-		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
-			changed[currentDepot] = true
-		} else if strings.HasPrefix(line, "==== ") && strings.Contains(line, "(binary)") {
-			// binary file diff: ==== //depot/path#rev (binary) ====
+		} else if strings.HasPrefix(line, "==== ") {
+			// any ==== header — track depot path; binary files use this without --- header
+			// format: ==== //depot/path#rev - /local/path ==== or ==== //depot/path#rev (binary) ====
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				depot := parts[1]
 				if idx := strings.Index(depot, "#"); idx > 0 {
 					depot = depot[:idx]
 				}
-				changed[depot] = true
-				currentDepot = ""
+				currentDepot = depot
+				// if the ==== line itself says (binary), mark immediately
+				if strings.Contains(line, "(binary)") {
+					changed[depot] = true
+					currentDepot = ""
+				}
 			}
+		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
+			changed[currentDepot] = true
+		} else if strings.Contains(line, "Binary files differ") && currentDepot != "" {
+			changed[currentDepot] = true
+			currentDepot = ""
 		}
 	}
 	return changed
