@@ -1862,7 +1862,7 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		}
 	} else {
 		// right side: top = pending, bottom = diff/log/resolve
-		pendingH := bodyH * 2 / 5
+		pendingH := bodyH * 3 / 5
 		if pendingH < 4 {
 			pendingH = 4
 		}
@@ -1936,7 +1936,7 @@ func (a *App) paneAt(x, y int) activePane {
 		}
 	}
 
-	pendingH := bodyH * 2 / 5
+	pendingH := bodyH * 3 / 5
 	if pendingH < 4 {
 		pendingH = 4
 	}
@@ -2050,7 +2050,7 @@ func (a *App) relayout() {
 	a.browserPane.SetSize(leftW, browserH)
 
 	// Right column: pending (top) + diff (bottom)
-	pendingH := bodyH * 2 / 5
+	pendingH := bodyH * 3 / 5
 	if pendingH < 4 {
 		pendingH = 4
 	}
