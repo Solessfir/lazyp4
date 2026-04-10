@@ -256,21 +256,47 @@ func (p *BrowserPane) collapseNode(node *browserNode) {
 	}
 }
 
-// ExpandAll1Level expands all loaded dirs currently visible in the tree and returns
-// the paths of unloaded dirs that need to be fetched before they can expand.
-// Each call goes one level deeper — repeated presses progressively expand the tree.
-func (p *BrowserPane) ExpandAll1Level() []string {
+// ExpandSelected1Level expands the selected directory one level deeper.
+// If the selected dir is collapsed, it expands it.
+// If it is already expanded, it expands each of its direct children one level.
+// Returns paths of unloaded dirs that must be fetched before they can expand.
+func (p *BrowserPane) ExpandSelected1Level() []string {
+	rows := p.filteredRows()
+	cur := p.cursor
+	if p.filter != "" {
+		cur = p.filterCursor
+	}
+	if len(rows) == 0 || cur >= len(rows) {
+		return nil
+	}
+	node := rows[cur].node
+	if !node.isDir {
+		return nil
+	}
+
 	var toLoad []string
-	for _, row := range p.rows {
-		if !row.node.isDir || row.node.expanded {
-			continue
-		}
-		if row.node.loaded {
-			row.node.expanded = true
+
+	if !node.expanded {
+		// Expand the selected dir itself.
+		if node.loaded {
+			node.expanded = true
 		} else {
-			toLoad = append(toLoad, row.node.path)
+			toLoad = append(toLoad, node.path)
+		}
+	} else {
+		// Already expanded — expand its direct children one level.
+		for _, child := range node.children {
+			if !child.isDir || child.expanded {
+				continue
+			}
+			if child.loaded {
+				child.expanded = true
+			} else {
+				toLoad = append(toLoad, child.path)
+			}
 		}
 	}
+
 	p.rebuild()
 	return toLoad
 }

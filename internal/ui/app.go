@@ -1430,7 +1430,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "L":
 		switch a.active {
 		case paneBrowser:
-			toLoad := a.browserPane.ExpandAll1Level()
+			toLoad := a.browserPane.ExpandSelected1Level()
 			if len(toLoad) > 0 {
 				cmds := make([]tea.Cmd, len(toLoad))
 				for i, path := range toLoad {
