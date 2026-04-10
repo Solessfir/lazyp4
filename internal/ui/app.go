@@ -1379,10 +1379,13 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.updateFocus()
 		if a.historyMode {
 			// load filelog for currently selected file/dir, or stream root
-			if f := a.fileList.SelectedFile(); f != nil {
+			if a.fileList.SelectedIsHeader() {
+				if root := a.browserPane.RootPath(); root != "" {
+					return a, a.cmdFilelogMax(depotWildcard(root), 100)
+				}
+			} else if f := a.fileList.SelectedFile(); f != nil {
 				return a, a.cmdFilelog(f.DepotFile)
-			}
-			if dp := a.fileList.SelectedDepotPath(); dp != "" {
+			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
 				return a, a.cmdFilelogMax(dp, 100)
 			}
 			if path := a.browserPane.SelectedPath(); path != "" {
@@ -1612,8 +1615,17 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd = a.fileList.Update(m)
 		if a.historyMode {
 			var histCmd tea.Cmd
-			if hp := a.fileList.SelectedHistoryPath(); hp != "" {
-				histCmd = a.cmdFilelog(hp)
+			if a.fileList.SelectedIsHeader() {
+				// CL header → entire stream history, same as root
+				if root := a.browserPane.RootPath(); root != "" {
+					histCmd = a.cmdFilelogMax(depotWildcard(root), 100)
+				}
+			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
+				if strings.HasSuffix(dp, "/...") {
+					histCmd = a.cmdFilelogMax(dp, 100)
+				} else {
+					histCmd = a.cmdFilelog(dp)
+				}
 			}
 			if histCmd != nil {
 				if f := a.fileList.SelectedFile(); f != nil {
@@ -2730,8 +2742,15 @@ func (a *App) cmdDiff(clientFile string) tea.Cmd {
 // used when switching panes in history mode.
 func (a *App) cmdFilelogForSelection() tea.Cmd {
 	if a.active == paneFileList {
-		if hp := a.fileList.SelectedHistoryPath(); hp != "" {
-			return a.cmdFilelog(hp)
+		if a.fileList.SelectedIsHeader() {
+			if root := a.browserPane.RootPath(); root != "" {
+				return a.cmdFilelogMax(depotWildcard(root), 100)
+			}
+		} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
+			if strings.HasSuffix(dp, "/...") {
+				return a.cmdFilelogMax(dp, 100)
+			}
+			return a.cmdFilelog(dp)
 		}
 	}
 	if a.active == paneBrowser {

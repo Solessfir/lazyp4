@@ -274,6 +274,18 @@ func (p *FileListPane) flattenTree(node *treeNode, clIndex int, clID, parentPath
 	}
 }
 
+// SelectedIsHeader returns true when the cursor is on a CL header row.
+func (p *FileListPane) SelectedIsHeader() bool {
+	if len(p.rows) == 0 {
+		return false
+	}
+	cur := p.activeCursor()
+	if cur >= len(p.rows) {
+		return false
+	}
+	return p.rows[cur].kind == rowKindHeader
+}
+
 // SelectedFile returns the currently highlighted OpenedFile, or nil.
 func (p *FileListPane) SelectedFile() *p4.OpenedFile {
 	if len(p.rows) == 0 {
