@@ -1376,6 +1376,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "g":
 		a.historyMode = !a.historyMode
+		a.updateFocus()
 		if a.historyMode {
 			// load filelog for currently selected file/dir, or stream root
 			if f := a.fileList.SelectedFile(); f != nil {
@@ -2067,6 +2068,9 @@ func (a *App) updateFocus() {
 	a.log.SetFocused(a.active == paneLog)
 	a.resolve.SetFocused(a.active == paneResolve)
 	a.cmdLog.SetFocused(a.active == paneCmdLog)
+	diffActive := !a.historyMode
+	a.diff.SetDiffActive(diffActive)
+	a.log.SetDiffActive(diffActive)
 }
 
 func (a *App) relayout() {
@@ -2298,7 +2302,7 @@ func (a *App) renderHotkeys() string {
 
 	// Global bindings — always shown.
 	global := []binding{
-		{"History", "g"},
+		{"History/Diff", "g"},
 		{"Fetch", "f"},
 		{"Sync", "p"},
 		{"Refresh", "r"},

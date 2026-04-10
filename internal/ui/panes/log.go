@@ -18,6 +18,7 @@ type LogPane struct {
 	cursor       int
 	entryOffsets []int // viewport line where each entry starts
 	focused      bool
+	diffActive   bool   // false = History is visible (this pane is shown)
 	width        int
 	height       int
 	innerW       int    // width - 2, used for word-wrap
@@ -65,6 +66,11 @@ func (p *LogPane) SetSize(w, h int) {
 func (p *LogPane) SetFocused(f bool) {
 	p.focused = f
 	p.rerender()
+}
+
+// SetDiffActive sets whether Diff (true) or History (false) is the visible pane.
+func (p *LogPane) SetDiffActive(active bool) {
+	p.diffActive = active
 }
 
 // ScrollOffset returns the viewport's top line offset.
@@ -189,7 +195,7 @@ func (p *LogPane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.viewport.View())
-	return injectTitle(rendered, p.titleNum, p.titleName, p.width, p.focused)
+	return injectDualTitle(rendered, p.titleNum, "Diff", p.titleName, p.diffActive, p.width, p.focused)
 }
 
 func (p *LogPane) rerender() {

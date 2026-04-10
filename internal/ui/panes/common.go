@@ -55,6 +55,56 @@ func injectFooter(rendered, text string, focused bool) string {
 	return strings.Join(lines, "\n")
 }
 
+// injectDualTitle renders a title with two tab-like names: the active one bright,
+// the inactive one dimmed. Format: ╭───[N]─ ActiveName / InactiveName ──────╮
+func injectDualTitle(rendered, num, firstName, secondName string, firstActive bool, paneWidth int, focused bool) string {
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 {
+		return rendered
+	}
+
+	measuredW := lipgloss.Width(lines[0])
+	if measuredW > 0 {
+		paneWidth = measuredW
+	}
+
+	borderColor := lipgloss.Color("8")
+	if focused {
+		borderColor = lipgloss.Color("12")
+	}
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	prefix := "───[" + num + "]─ "
+	separator := " / "
+	var activeLabel, inactiveLabel string
+	if firstActive {
+		activeLabel = firstName
+		inactiveLabel = secondName
+	} else {
+		activeLabel = secondName
+		inactiveLabel = firstName
+	}
+
+	// Measure the visual width of the full label.
+	plainLabel := prefix + firstName + separator + secondName
+	innerW := paneWidth - 2
+	dashCount := innerW - len([]rune(plainLabel))
+	if dashCount < 0 {
+		dashCount = 0
+	}
+
+	top := borderStyle.Render("╭"+prefix) +
+		activeStyle.Render(activeLabel) +
+		borderStyle.Render(separator) +
+		dimStyle.Render(inactiveLabel) +
+		borderStyle.Render(strings.Repeat("─", dashCount)+"╮")
+
+	lines[0] = top
+	return strings.Join(lines, "\n")
+}
+
 func injectTitle(rendered, num, name string, paneWidth int, focused bool) string {
 	lines := strings.Split(rendered, "\n")
 	if len(lines) == 0 {

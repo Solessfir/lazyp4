@@ -10,11 +10,12 @@ import (
 
 // DiffPane shows colorized p4 diff output for the selected file.
 type DiffPane struct {
-	viewport viewport.Model
-	raw      string // stored so we can re-truncate on resize
-	focused  bool
-	width    int
-	height   int
+	viewport    viewport.Model
+	raw         string // stored so we can re-truncate on resize
+	focused     bool
+	diffActive  bool // true = Diff is the visible bottom-right pane
+	width       int
+	height      int
 }
 
 var (
@@ -54,6 +55,11 @@ func (p *DiffPane) SetFocused(f bool) {
 	p.focused = f
 }
 
+// SetDiffActive sets whether Diff (true) or History (false) is the visible pane.
+func (p *DiffPane) SetDiffActive(active bool) {
+	p.diffActive = active
+}
+
 // SetContent replaces the diff text.
 func (p *DiffPane) SetContent(raw string) {
 	p.raw = raw
@@ -90,7 +96,7 @@ func (p *DiffPane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.viewport.View())
-	return injectTitle(rendered, "5", "Diff", p.width, p.focused)
+	return injectDualTitle(rendered, "5", "Diff", "History", p.diffActive, p.width, p.focused)
 }
 
 // colorize applies ANSI colors to unified diff lines, truncating each to maxWidth.
