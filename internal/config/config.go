@@ -38,8 +38,9 @@ type AuthConfig struct {
 
 // UIConfig holds display preferences.
 type UIConfig struct {
-	Theme         string `toml:"theme"`
-	FetchInterval string `toml:"fetch_interval"` // e.g. "10m", "30s". Empty = disabled.
+	Theme            string `toml:"theme"`
+	FetchInterval    string `toml:"fetch_interval"`     // e.g. "10m", "30s". Empty = disabled.
+	PendingTreeView  bool   `toml:"pending_tree_view"`  // Start pending pane in tree view (default: true).
 }
 
 // Load reads the platform config file, then overrides with env vars, then
@@ -52,7 +53,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		P4:   P4Config{EnvOverTOML: true},
 		Auth: AuthConfig{StorePassword: false},
-		UI:   UIConfig{Theme: "dark", FetchInterval: "10m"},
+		UI:   UIConfig{Theme: "dark", FetchInterval: "10m", PendingTreeView: true},
 	}
 
 	// 1. lazyp4.toml — read first to get EnvOverTOML flag and base P4 values.

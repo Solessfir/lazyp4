@@ -76,8 +76,9 @@ env_over_toml = true                   # true: env vars win over toml; false: to
 store_password = false           # Cache password in system keyring
 
 [ui]
-theme          = "dark"          # "dark" or "light"
-fetch_interval = "10m"           # Background refresh interval (empty = disabled)
+theme             = "dark"       # "dark" or "light"
+fetch_interval    = "10m"        # Background refresh interval (empty = disabled)
+pending_tree_view = true         # Start pending pane in tree view (false = flat list)
 
 [linux]
 file_manager = ""                # File manager for `o` key (e.g. "nemo"). Auto-detected if empty.

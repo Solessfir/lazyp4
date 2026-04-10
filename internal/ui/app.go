@@ -330,8 +330,12 @@ type App struct {
 }
 
 // New creates the root App model.
-func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string) *App {
+func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string, pendingTreeView bool) *App {
 	hv := viewport.New(54, 20)
+	fl := panes.NewFileListPane()
+	if !pendingTreeView {
+		fl.ToggleMode()
+	}
 	a := &App{
 		client:           client,
 		fetchInterval:    fetchInterval,
@@ -339,7 +343,7 @@ func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string
 		active:        paneBrowser,
 		statusPane:  panes.NewStatusPane(),
 		browserPane: panes.NewBrowserPane(),
-		fileList:    panes.NewFileListPane(),
+		fileList:    fl,
 		streamsPane: panes.NewStreamsPane(),
 		shelvedPane: panes.NewShelvedPane(),
 		diff:        panes.NewDiffPane(),
