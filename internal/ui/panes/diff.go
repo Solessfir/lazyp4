@@ -11,6 +11,7 @@ import (
 // DiffPane shows colorized p4 diff output for the selected file.
 type DiffPane struct {
 	viewport viewport.Model
+	raw      string // stored so we can re-truncate on resize
 	focused  bool
 	width    int
 	height   int
@@ -43,6 +44,9 @@ func (p *DiffPane) SetSize(w, h int) {
 	}
 	p.viewport.Width = innerW
 	p.viewport.Height = innerH
+	if p.raw != "" {
+		p.rerender()
+	}
 }
 
 // SetFocused toggles focus highlight.
@@ -52,7 +56,12 @@ func (p *DiffPane) SetFocused(f bool) {
 
 // SetContent replaces the diff text.
 func (p *DiffPane) SetContent(raw string) {
-	p.viewport.SetContent(colorize(raw))
+	p.raw = raw
+	p.rerender()
+}
+
+func (p *DiffPane) rerender() {
+	p.viewport.SetContent(colorize(p.raw, p.viewport.Width))
 	p.viewport.GotoTop()
 }
 
@@ -84,11 +93,17 @@ func (p *DiffPane) View() string {
 	return injectTitle(rendered, "5", "Diff", p.width, p.focused)
 }
 
-// colorize applies ANSI colors to unified diff lines.
-func colorize(raw string) string {
+// colorize applies ANSI colors to unified diff lines, truncating each to maxWidth.
+func colorize(raw string, maxWidth int) string {
 	lines := strings.Split(raw, "\n")
 	var sb strings.Builder
 	for i, line := range lines {
+		if maxWidth > 0 {
+			runes := []rune(line)
+			if len(runes) > maxWidth {
+				line = string(runes[:maxWidth])
+			}
+		}
 		var colored string
 		switch {
 		case strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
