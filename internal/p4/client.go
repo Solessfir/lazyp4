@@ -175,6 +175,8 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 // "(... files differ ...)" line with a size summary.
 func (c *Client) Diff(clientFile string) (string, error) {
 	out, err := c.run("diff", "-du", "-f", clientFile)
+	// p4 diff exits non-zero when files differ; for binary files the marker is
+	// "(... files differ ...)" — treat this as success, not an error.
 	if strings.Contains(out, "files differ") {
 		return c.annotateBinaryDiff(out, clientFile), nil
 	}
@@ -230,8 +232,10 @@ func formatBytes(n int64) string {
 		return fmt.Sprintf("%d B", n)
 	case n < 1024*1024:
 		return fmt.Sprintf("%.1f KB", float64(n)/1024)
-	default:
+	case n < 1024*1024*1024:
 		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	default:
+		return fmt.Sprintf("%.1f GB", float64(n)/(1024*1024*1024))
 	}
 }
 

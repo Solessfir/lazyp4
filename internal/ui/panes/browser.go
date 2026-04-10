@@ -275,11 +275,13 @@ func (p *BrowserPane) ExpandSelected1Level() []string {
 	}
 
 	var toLoad []string
+	changed := false
 
 	if !node.expanded {
 		// Expand the selected dir itself.
 		if node.loaded {
 			node.expanded = true
+			changed = true
 		} else {
 			toLoad = append(toLoad, node.path)
 		}
@@ -291,13 +293,16 @@ func (p *BrowserPane) ExpandSelected1Level() []string {
 			}
 			if child.loaded {
 				child.expanded = true
+				changed = true
 			} else {
 				toLoad = append(toLoad, child.path)
 			}
 		}
 	}
 
-	p.rebuild()
+	if changed {
+		p.rebuild()
+	}
 	return toLoad
 }
 
