@@ -171,23 +171,68 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 }
 
 // Diff returns the unified diff output for a single file.
-// Returns a human-readable message for binary files instead of raw bytes.
+// For Binary files, keeps the --- / +++ headers and replaces the
+// "(... files differ ...)" line with a size summary.
 func (c *Client) Diff(clientFile string) (string, error) {
 	out, err := c.run("diff", "-du", "-f", clientFile)
-	if err != nil {
-		// p4 diff exits non-zero for binary files - surface a clean message.
-		if strings.Contains(err.Error(), "binary") || strings.Contains(out, "(binary)") {
-			return "(binary file — diff not available)", nil
-		}
-		return "", err
+	if strings.Contains(out, "files differ") {
+		return c.annotateBinaryDiff(out, clientFile), nil
 	}
-	if strings.Contains(out, "(binary)") {
-		return "(binary file — diff not available)", nil
+	if err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(out) == "" {
 		return "(files are identical)", nil
 	}
 	return out, nil
+}
+
+// annotateBinaryDiff keeps the --- / +++ headers and replaces the
+// "(... files differ ...)" marker with a size annotation.
+func (c *Client) annotateBinaryDiff(raw, clientFile string) string {
+	localSize := ""
+	if info, err := os.Stat(clientFile); err == nil {
+		localSize = formatBytes(info.Size())
+	}
+
+	headSize := ""
+	if fout, _ := c.run("fstat", "-Ol", clientFile); fout != "" {
+		for _, line := range strings.Split(fout, "\n") {
+			if after, ok := strings.CutPrefix(strings.TrimSpace(line), "... headSize "); ok {
+				if n, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64); err == nil {
+					headSize = formatBytes(n)
+				}
+				break
+			}
+		}
+	}
+
+	sizeInfo := "Binary - diff not available"
+	switch {
+	case headSize != "" && localSize != "":
+		sizeInfo = fmt.Sprintf("Binary  %s → %s", headSize, localSize)
+	case localSize != "":
+		sizeInfo = fmt.Sprintf("Binary  %s", localSize)
+	}
+
+	lines := strings.Split(raw, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "files differ") {
+			lines[i] = sizeInfo
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatBytes(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
 }
 
 // SyncToCL syncs the workspace to a specific changelist.
@@ -1100,7 +1145,7 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 
 // HasChanges returns true if the file opened for edit differs from the have revision.
 // Do NOT use -f here — that compares against depot HEAD, not the synced revision.
-// Works for both text (@@) and binary ("Binary files differ") files.
+// Works for both text (@@) and binary ("files differ") files.
 func (c *Client) HasChanges(clientFile string) (bool, error) {
 	out, err := c.run("diff", "-du", clientFile)
 	if err != nil {
@@ -1130,8 +1175,8 @@ func (c *Client) FilesDiffStatus() map[string]bool {
 				currentDepot = parts[1]
 			}
 		} else if strings.HasPrefix(line, "==== ") {
-			// any ==== header — track depot path; binary files use this without --- header
-			// format: ==== //depot/path#rev - /local/path ==== or ==== //depot/path#rev (binary) ====
+			// any ==== header — track depot path; Binary files use this without --- header
+			// format: ==== //depot/path#rev - /local/path ==== or ==== //depot/path#rev (Binary) ====
 			parts := strings.Fields(line)
 			if len(parts) >= 2 {
 				depot := parts[1]
