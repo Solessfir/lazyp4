@@ -1106,7 +1106,7 @@ func (c *Client) HasChanges(clientFile string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(out, "@@") || strings.Contains(out, "Binary files differ"), nil
+	return strings.Contains(out, "@@") || strings.Contains(out, "files differ"), nil
 }
 
 // FilesDiffStatus returns the set of depot paths for open-for-edit files that
@@ -1119,9 +1119,10 @@ func (c *Client) FilesDiffStatus() map[string]bool {
 	cmd.Stdout = &out
 	cmd.Run() // exit code ignored — non-zero is normal when any file has changes
 
+	raw := out.String()
 	changed := map[string]bool{}
 	var currentDepot string
-	for _, line := range strings.Split(out.String(), "\n") {
+	for _, line := range strings.Split(raw, "\n") {
 		if strings.HasPrefix(line, "--- //") {
 			// text diff header: --- //depot/path\tdate
 			parts := strings.Fields(line)
@@ -1146,7 +1147,7 @@ func (c *Client) FilesDiffStatus() map[string]bool {
 			}
 		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
 			changed[currentDepot] = true
-		} else if strings.Contains(line, "Binary files differ") && currentDepot != "" {
+		} else if strings.Contains(line, "files differ") && currentDepot != "" {
 			changed[currentDepot] = true
 			currentDepot = ""
 		}
