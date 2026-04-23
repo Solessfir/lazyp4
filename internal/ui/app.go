@@ -310,6 +310,7 @@ type App struct {
 	logPath          string // last path loaded into the history pane
 	logMax           int    // last max passed to cmdFilelogMax (0 = unlimited)
 	syncPath         string // depot path used for the current/last sync
+	pinnedCL         string // non-empty when synced to a specific CL instead of HEAD
 	offlineMode      bool   // true = p4 server unreachable
 
 	width  int
@@ -675,6 +676,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				a.status = fmt.Sprintf("%s complete (%d files)", opName, fileCount)
 			}
+			if opName == "Syncing" {
+				a.pinnedCL = ""
+			}
 			a.cmdLog.Add(p4cmd, fmt.Sprintf("%d files", fileCount))
 		}
 		if opName == "Submitting" {
@@ -981,6 +985,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "checkout failed: " + m.err.Error()
 			a.cmdLog.Add("p4 sync @"+m.cl, "error: "+m.err.Error())
 		} else {
+			a.pinnedCL = m.cl
 			a.status = fmt.Sprintf("Workspace synced to CL %s", m.cl)
 			a.cmdLog.Add("p4 sync @"+m.cl, "done")
 		}
@@ -1331,6 +1336,18 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.opRunning {
 			a.status = a.opName + " already in progress"
 			return a, nil
+		}
+		if a.active == paneBrowser {
+			path := a.browserPane.SelectedPath()
+			if path == "" {
+				a.status = "No file or folder selected"
+				return a, nil
+			}
+			a.status = "Syncing " + path + "..."
+			return a, a.cmdSyncPath(path)
+		}
+		if a.pinnedCL != "" {
+			return a, a.cmdSyncToCL(a.client.Stream, a.pinnedCL)
 		}
 		syncTarget := "//..."
 		if a.client.Stream != "" {
@@ -2576,7 +2593,7 @@ func (a *App) helpContent() string {
 		{k: "tab", desc: "Cycle panel focus"},
 		{k: "1–6", desc: "Jump to pane by number"},
 		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
-		{k: "p", desc: "Sync workspace"},
+		{k: "p", desc: "Sync selected path (browser) or entire workspace (other panes)"},
 		{k: "r", desc: "Refresh"},
 		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
 		{k: "q", desc: "Quit"},
@@ -3088,6 +3105,13 @@ func (a *App) cmdIntegrateClassic(source, target string) tea.Cmd {
 		out, err := a.client.IntegrateClassic(source, target)
 		_ = out
 		return integrateDoneMsg{op: "integrate", src: source + " → " + target, err: err}
+	}
+}
+
+func (a *App) cmdSyncPath(path string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := a.client.SyncPath(path)
+		return forceSyncDoneMsg{path: path, err: err}
 	}
 }
 

@@ -98,7 +98,7 @@ Press `?` inside the app for context-sensitive help.
 | `esc` | Back to browser pane |
 | `g` | Toggle history / diff pane |
 | `f` | Fetch — dry-run sync, shows pending file count |
-| `p` | Sync workspace |
+| `p` | Sync selected path (browser pane) or entire workspace (other panes) |
 | `r` | Refresh |
 | `c` | Cancel current operation |
 | `v` | Visual mode (disables mouse for text selection) |
@@ -119,7 +119,7 @@ Press `?` inside the app for context-sensitive help.
 | `d` | Discard (revert) checked-out file |
 | `u` | Revert unchanged files only (skips files with local changes) |
 | `o` | Reveal in file manager |
-| `P` | Force sync selected file or folder (select root to sync entire workspace) |
+| `P` | Force sync selected file or folder only (contrast: `p` syncs entire workspace) |
 | `D` | Mark for delete |
 
 ### Pending pane

@@ -120,10 +120,19 @@ func (p *LogPane) SetCurrentCL(cl string) {
 	p.rerender()
 }
 
-// SetEntries replaces the displayed log entries and resets the cursor.
+// SetEntries replaces the displayed log entries, preserving the selected CL when possible.
 func (p *LogPane) SetEntries(entries []p4.FilelogEntry) {
+	prevCL := p.SelectedChange()
 	p.entries = entries
 	p.cursor = 0
+	if prevCL != "" {
+		for i, e := range entries {
+			if e.Change == prevCL {
+				p.cursor = i
+				break
+			}
+		}
+	}
 	w := p.innerW
 	if w <= 0 {
 		w = p.viewport.Width
@@ -131,7 +140,7 @@ func (p *LogPane) SetEntries(entries []p4.FilelogEntry) {
 	content, offsets := buildLogContent(entries, p.cursor, w, p.focused, p.currentCL)
 	p.entryOffsets = offsets
 	p.viewport.SetContent(content)
-	p.viewport.GotoTop()
+	p.scrollToCursor()
 }
 
 // Init satisfies tea.Model.

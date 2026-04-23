@@ -240,6 +240,9 @@ func formatBytes(n int64) string {
 }
 
 // SyncToCL syncs the workspace to a specific changelist.
+// Uses -f (force) so the workspace exactly matches the CL state: files added
+// after the target CL are removed, deleted files are restored, modified files
+// are overwritten — mirroring git checkout behaviour.
 // For stream depots pass the stream path (e.g. "//depot/main"); for classic depots pass "".
 func (c *Client) SyncToCL(streamPath, cl string) error {
 	var target string
@@ -248,7 +251,7 @@ func (c *Client) SyncToCL(streamPath, cl string) error {
 	} else {
 		target = "@" + cl // syncs entire workspace client view to CL
 	}
-	_, err := c.run("sync", target)
+	_, err := c.run("sync", "-f", target)
 	return err
 }
 
@@ -844,6 +847,10 @@ func (c *Client) DeleteShelf(clID string) error {
 }
 
 // ForceSyncPath runs p4 sync -f on the given depot path (file or wildcard).
+func (c *Client) SyncPath(depotPath string) (string, error) {
+	return c.run("sync", depotPath)
+}
+
 func (c *Client) ForceSyncPath(depotPath string) (string, error) {
 	return c.run("sync", "-f", depotPath)
 }
