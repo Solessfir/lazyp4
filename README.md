@@ -94,7 +94,7 @@ Press `?` inside the app for context-sensitive help.
 |-----|--------|
 | `j` / `k` | Navigate up / down |
 | `tab` | Cycle pane focus |
-| `1` – `5` | Jump to pane by number |
+| `1` - `5` | Jump to pane by number |
 | `esc` | Back to browser pane |
 | `g` | Toggle history / diff pane |
 | `f` | Fetch — dry-run sync, shows pending file count |
