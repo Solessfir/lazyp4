@@ -363,7 +363,7 @@ func (p *BrowserPane) filteredRows() []browserRow {
 }
 
 // SelectedPath returns the depot path of the selected item.
-// For directories, appends "/..." for use with p4 sync -f.
+// For directories, appends "/..." to make the path recursive.
 func (p *BrowserPane) SelectedPath() string {
 	rows := p.filteredRows()
 	cur := p.cursor

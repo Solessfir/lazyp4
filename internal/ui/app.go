@@ -937,7 +937,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "Force sync complete: " + m.path
 			a.cmdLog.Add("p4 sync -f "+m.path, "done")
 		}
-		return a, a.refresh()
+		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdFetchCurrentCL())
 
 	case reconcileDoneMsg:
 		logPath := filepath.ToSlash(m.path)
@@ -989,7 +989,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Workspace synced to CL %s", m.cl)
 			a.cmdLog.Add("p4 sync @"+m.cl, "done")
 		}
-		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdLoadShelved())
+		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdFetchCurrentCL(), a.cmdLoadShelved())
 
 	case authRequiredMsg:
 		a.authModal = newAuthModal()
