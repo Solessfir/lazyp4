@@ -3,12 +3,7 @@
 A lazygit-inspired terminal UI for Perforce (p4).
 
 > [!WARNING]
-> **Use at your own risk.** I use lazyp4 in a production environment daily without issues, but I take no responsibility if it wipes your depot, destroys local data, or causes any other damage.
-
-![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue)
-![Release](https://img.shields.io/github/v/release/Solessfir/lazyp4)
+> **Use at your own risk.** This project was built with agentic AI coding (Claude). I use lazyp4 in a production environment daily without issues, but I take no responsibility if it wipes your depot, destroys local data, or causes any other damage.
 
 ## Features
 
@@ -168,7 +163,3 @@ Press `?` inside the app for context-sensitive help.
 | Key | Action |
 |-----|--------|
 | `space` / `enter` | Checkout workspace to selected CL |
-
-## Disclaimer
-
-This project was built with agentic AI coding (Claude). I have a life.
