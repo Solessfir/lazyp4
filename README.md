@@ -10,19 +10,19 @@ A lazygit-inspired terminal UI for Perforce (p4).
 ## Features
 
 - Browse open changelists and files in tree or flat view
-- Color-coded file status — yellow = modified, default = checked out unchanged, green = added, red = deleted
+- Color-coded file status - yellow = modified, default = checked out unchanged, green = added, red = deleted
 - Colorized unified diff viewer
 - File revision history
 - Mark individual files for partial submit
 - Shelve and unshelve changelists (including cross-stream via `-S`)
-- Stream depot support — stream browser, stream switching, merge/copy integration
-- Fetch (dry-run sync) — see how many CLs are pending before committing to a sync
+- Stream depot support - stream browser, stream switching, merge/copy integration
+- Fetch (dry-run sync) - see how many CLs are pending before committing to a sync
 - Reconcile offline changes (`p4 reconcile` + `p4 edit` fallback)
 - Discard added files with optional local delete (`dd`)
 - Skip discard confirmation for files with no local changes
-- Conflict resolution — external merge tool, auto-resolve (accept theirs/yours/safe)
+- Conflict resolution - external merge tool, auto-resolve (accept theirs/yours/safe)
 - `[?]` indicator on files needing resolve
-- Mouse support — click to focus panes and select files
+- Mouse support - click to focus panes and select files
 - Keyboard-driven with lazygit-style numbered pane shortcuts
 - Context-sensitive hotkey bar
 
@@ -48,9 +48,9 @@ go build -o lazyp4 ./cmd/main.go
 
 Connection settings are resolved in this order (highest priority first):
 
-1. **P4CONFIG file** — if `$P4CONFIG` is set, lazyp4 walks up from the current directory looking for that file (e.g. `.p4config`)
-2. **Environment variables** — `P4PORT`, `P4USER`, `P4CLIENT`
-3. **lazyp4.toml** — platform config file (lowest priority)
+1. **P4CONFIG file** - if `$P4CONFIG` is set, lazyp4 walks up from the current directory looking for that file (e.g. `.p4config`)
+2. **Environment variables** - `P4PORT`, `P4USER`, `P4CLIENT`
+3. **lazyp4.toml** - platform config file (lowest priority)
 
 Config file location:
 
@@ -94,7 +94,7 @@ Press `?` inside the app for context-sensitive help.
 | `1` - `5` | Jump to pane by number |
 | `esc` | Back to browser pane |
 | `g` | Toggle history / diff pane |
-| `f` | Fetch — dry-run sync, shows pending file count |
+| `f` | Fetch - dry-run sync, shows pending file count |
 | `p` | Sync selected path (browser pane) or entire workspace (other panes) |
 | `r` | Refresh |
 | `c` | Cancel current operation |
@@ -112,7 +112,7 @@ Press `?` inside the app for context-sensitive help.
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
 | `space` | Reconcile file or folder (edit / add / delete) |
-| `a` | Checkout for edit — works on files and folders (recursive) |
+| `a` | Checkout for edit - works on files and folders (recursive) |
 | `d` | Discard (revert) checked-out file |
 | `u` | Revert unchanged files only (skips files with local changes) |
 | `o` | Reveal in file manager |
@@ -127,11 +127,11 @@ Press `?` inside the app for context-sensitive help.
 | `enter` | Open file |
 | `o` | Reveal in file manager |
 | `l` / `h` | Expand / collapse folder |
-| `s` | Submit — opens description prompt; uses marked files if any |
+| `s` | Submit - opens description prompt; uses marked files if any |
 | `e` / `E` | Shelve (with revert) / shelve only |
 | `m` | Move file(s) to a different CL |
-| `d` | Discard (revert) — skips confirmation if file is unchanged; `dd` to also delete local file for added files |
-| `u` | Revert unchanged files only — works on selected file, marked files, or entire CL |
+| `d` | Discard (revert) - skips confirmation if file is unchanged; `dd` to also delete local file for added files |
+| `u` | Revert unchanged files only - works on selected file, marked files, or entire CL |
 | `R` | Show conflicts (scoped to file or folder) |
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
@@ -141,7 +141,7 @@ Press `?` inside the app for context-sensitive help.
 | Key | Action |
 |-----|--------|
 | `enter` / `l` | Switch workspace to selected stream |
-| `i` | Integrate — pull from parent (`m`) or push to parent (`c`) |
+| `i` | Integrate - pull from parent (`m`) or push to parent (`c`) |
 
 ### Shelved pane
 
