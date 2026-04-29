@@ -636,7 +636,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "sync dry-run failed: " + m.err.Error()
 			return a, nil
 		}
-		a.opTotal = m.total
+		a.opTotal = 0 // CL count from dry-run != file count; leave unknown
 		a.opDone = 0
 		return a, a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
 			err := a.client.SyncStreaming(ctx, ch)
@@ -2255,7 +2255,11 @@ func (a *App) renderProgressBar() string {
 
 	var count string
 	if a.opTotal == 0 {
-		count = styleHotkeys.Render("Calculating...")
+		if a.opDone > 0 {
+			count = styleHotkeys.Render(fmt.Sprintf("%d files", a.opDone))
+		} else {
+			count = styleHotkeys.Render("Calculating...")
+		}
 	} else {
 		count = styleHotkeys.Render(fmt.Sprintf("%d/%d files", a.opDone, a.opTotal))
 	}
