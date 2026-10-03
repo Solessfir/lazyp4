@@ -32,15 +32,6 @@ type Changelist struct {
 	Files       []OpenedFile
 }
 
-// DepotFile is a file in the depot (from p4 files / p4 fstat).
-type DepotFile struct {
-	DepotFile  string
-	ClientFile string
-	HeadRev    int
-	HeadAction Action
-	HeadType   string
-}
-
 // FilelogEntry is one revision entry from p4 filelog.
 type FilelogEntry struct {
 	DepotFile   string
@@ -57,8 +48,6 @@ type FilelogEntry struct {
 type ConflictFile struct {
 	ClientFile string
 	FromFile   string
-	StartRev   int
-	EndRev     int
 }
 
 // ShelvedFile is a file stored in a shelved changelist.

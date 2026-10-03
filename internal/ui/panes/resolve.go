@@ -2,8 +2,6 @@ package panes
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,7 +70,9 @@ func (p *ResolvePane) Update(msg tea.Msg) tea.Cmd {
 		case "enter":
 			return p.openMergeTool()
 		case "a":
-			return p.autoResolve("-at", "-ab")
+			return p.autoResolve("-am")
+		case "t":
+			return p.autoResolve("-at")
 		case "y":
 			return p.autoResolve("-ay")
 		case "s":
@@ -82,44 +82,41 @@ func (p *ResolvePane) Update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// autoResolve returns a ResolveAutoMsg.
-// Multiple flags are tried in order; the first that succeeds wins.
-// Resolves all pending files (no specific file arg) to avoid path issues with cross-stream conflicts.
+// autoResolve preserves the displayed conflict scope.
 func (p *ResolvePane) autoResolve(flags ...string) tea.Cmd {
 	if len(p.conflicts) == 0 {
 		return nil
 	}
-	return func() tea.Msg { return ResolveAutoMsg{Flags: flags} }
+	files := make([]string, 0, len(p.conflicts))
+	seen := make(map[string]bool)
+	for _, conflict := range p.conflicts {
+		if !seen[conflict.ClientFile] {
+			seen[conflict.ClientFile] = true
+			files = append(files, conflict.ClientFile)
+		}
+	}
+	return func() tea.Msg { return ResolveAutoMsg{Files: files, Flags: flags} }
 }
 
-// openMergeTool launches $P4MERGE or $EDITOR for the selected conflict.
+// openMergeTool requests an interactive Perforce resolve for the selected file.
 func (p *ResolvePane) openMergeTool() tea.Cmd {
 	if len(p.conflicts) == 0 || p.cursor >= len(p.conflicts) {
 		return nil
 	}
 	file := p.conflicts[p.cursor].ClientFile
 
-	tool := os.Getenv("P4MERGE")
-	if tool == "" {
-		tool = os.Getenv("EDITOR")
-	}
-	if tool == "" {
-		tool = "vi"
-	}
-
-	return tea.ExecProcess(exec.Command(tool, file), func(err error) tea.Msg {
-		return ResolveFinishedMsg{Err: err}
-	})
+	return func() tea.Msg { return ResolveInteractiveMsg{File: file} }
 }
+
+type ResolveInteractiveMsg struct{ File string }
 
 // ResolveFinishedMsg is sent after the merge tool exits.
 type ResolveFinishedMsg struct{ Err error }
 
-// ResolveAutoMsg is sent when the user triggers an auto-resolve action.
-// Flags are tried in order until one succeeds.
-// File is empty to resolve all pending conflicts at once.
+// ResolveAutoMsg is sent when the user triggers a scoped auto-resolve action.
 type ResolveAutoMsg struct {
-	Flags []string // e.g. ["-at", "-ab"] — first applicable flag wins
+	Files []string
+	Flags []string
 }
 
 // View renders the pane.
@@ -146,10 +143,10 @@ func (p *ResolvePane) renderLines(maxH int) string {
 	}
 
 	var sb strings.Builder
-	for i, c := range p.conflicts {
-		if i >= maxH {
-			break
-		}
+	start := max(0, p.cursor-maxH+1)
+	end := min(start+maxH, len(p.conflicts))
+	for i := start; i < end; i++ {
+		c := p.conflicts[i]
 		label := fmt.Sprintf("  %s", shortName(c.ClientFile, p.width-6))
 		var line string
 		if i == p.cursor && p.focused {
@@ -158,7 +155,7 @@ func (p *ResolvePane) renderLines(maxH int) string {
 			line = styleConflict.Render(label)
 		}
 		sb.WriteString(line)
-		if i < len(p.conflicts)-1 {
+		if i < end-1 {
 			sb.WriteByte('\n')
 		}
 	}

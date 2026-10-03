@@ -1,0 +1,46 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+
+  perforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install isolated Perforce tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/p4"
+          curl --fail --location --retry 3 https://cdist2.perforce.com/perforce/r25.2/bin.linux26x86_64/p4 -o "$RUNNER_TEMP/p4/p4"
+          curl --fail --location --retry 3 https://cdist2.perforce.com/perforce/r25.2/bin.linux26x86_64/p4d -o "$RUNNER_TEMP/p4/p4d"
+          chmod +x "$RUNNER_TEMP/p4/p4" "$RUNNER_TEMP/p4/p4d"
+          echo "$RUNNER_TEMP/p4" >> "$GITHUB_PATH"
+      - name: Test native configuration and isolated server workflows
+        env:
+          LAZYP4_TEST_P4D: ${{ runner.temp }}/p4/p4d
+        run: go test -count=1 ./...

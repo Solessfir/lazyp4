@@ -20,7 +20,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Reconcile offline changes (`p4 reconcile` + `p4 edit` fallback)
 - Discard added files with optional local delete (`dd`)
 - Skip discard confirmation for files with no local changes
-- Conflict resolution - external merge tool, auto-resolve (accept theirs/yours/safe)
+- Conflict resolution - interactive Perforce merge tools, automatic merging, safe resolve, and confirmed accept theirs/yours
 - `[?]` indicator on files needing resolve
 - Mouse support - click to focus panes and select files
 - Keyboard-driven with lazygit-style numbered pane shortcuts
@@ -28,7 +28,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - `p4` CLI installed and in `$PATH`
 - A configured Perforce workspace (`P4PORT`, `P4USER`, `P4CLIENT`, a P4CONFIG file, or the lazyp4 config file)
 
@@ -48,9 +48,11 @@ go build -o lazyp4 ./cmd/main.go
 
 Connection settings are resolved in this order (highest priority first):
 
-1. **P4CONFIG file** - if `$P4CONFIG` is set, lazyp4 walks up from the current directory looking for that file (e.g. `.p4config`)
-2. **Environment variables** - `P4PORT`, `P4USER`, `P4CLIENT`
+1. **P4CONFIG files** - native Perforce lookup includes ancestor inheritance and uses the first occurrence of duplicate settings
+2. **Native Perforce settings** - effective `P4PORT`, `P4USER`, and `P4CLIENT` from `p4 set`, including environment variables, P4ENVIRO, and platform registry settings
 3. **lazyp4.toml** - platform config file (lowest priority)
+
+With `env_over_toml = false`, explicit TOML values take precedence over native settings outside P4CONFIG; native settings still fill empty fields. P4CONFIG always takes priority.
 
 Config file location:
 
@@ -67,19 +69,22 @@ All fields are optional:
 port         = "ssl:your-server:1666"  # Perforce server address
 user         = "youruser"              # Perforce username
 client       = "your-workspace"        # Workspace (client) name
-env_over_toml = true                   # true: env vars win over toml; false: toml wins
+env_over_toml = true                   # Native settings win over TOML; P4CONFIG always wins
 
 [auth]
-store_password = false           # Cache password in system keyring
+store_password = false           # Opt in to password reads/writes in the system keyring
 
 [ui]
-theme             = "dark"       # "dark" or "light"
 fetch_interval    = "10m"        # Background refresh interval (empty = disabled)
 pending_tree_view = true         # Start pending pane in tree view (false = flat list)
 
 [linux]
 file_manager = ""                # File manager for `o` key (e.g. "nemo"). Auto-detected if empty.
 ```
+
+Password storage is disabled by default. When enabled, credentials are stored separately for each effective server and user. Existing Perforce login tickets work with either setting.
+
+lazyp4 verifies the connection before requesting a password and never accepts an unknown SSL fingerprint automatically. Verify the fingerprint with your Perforce administrator, then register it with `p4 -p ssl:your-server:1666 trust -i <verified-fingerprint>` before launching lazyp4.
 
 ## Keybindings
 
@@ -128,9 +133,9 @@ Press `?` inside the app for context-sensitive help.
 | `o` | Reveal in file manager |
 | `l` / `h` | Expand / collapse folder |
 | `s` | Submit - opens description prompt; uses marked files if any |
-| `e` / `E` | Shelve (with revert) / shelve only |
+| `e` / `E` | Shelve selected or marked files into a new CL, with revert / without revert |
 | `m` | Move file(s) to a different CL |
-| `d` | Discard (revert) - skips confirmation if file is unchanged; `dd` to also delete local file for added files |
+| `d` | Discard selected file, marked files, or CL files; skips confirmation if a single file is unchanged; `dd` also deletes local added files |
 | `u` | Revert unchanged files only - works on selected file, marked files, or entire CL |
 | `R` | Show conflicts (scoped to file or folder) |
 | `t` | Toggle tree / flat view |
@@ -143,6 +148,8 @@ Press `?` inside the app for context-sensitive help.
 | `enter` / `l` | Switch workspace to selected stream |
 | `i` | Integrate - pull from parent (`m`) or push to parent (`c`) |
 
+Pull selects a child stream and merges its parent into the current child workspace. Promotion selects the source child while using a workspace for its parent, then stages a copy from child to parent. The app checks the workspace direction before running either operation.
+
 ### Shelved pane
 
 | Key | Action |
@@ -154,10 +161,11 @@ Press `?` inside the app for context-sensitive help.
 
 | Key | Action |
 |-----|--------|
-| `enter` | Open merge tool (`$P4MERGE` or `$EDITOR`) |
-| `a` | Auto-resolve (accept theirs, then branch) |
-| `y` | Auto-resolve (accept yours) |
-| `s` | Auto-resolve (safe) |
+| `enter` | Interactive `p4 resolve` for the selected conflict, honoring effective `P4MERGE` |
+| `a` | Automatic merge (`-am`) of displayed scoped conflicts |
+| `t` | Accept theirs (`-at`), after confirmation |
+| `y` | Accept yours (`-ay`), after confirmation |
+| `s` | Safe automatic resolve (`-as`) of displayed scoped conflicts |
 | `esc` | Close conflicts pane |
 
 ### History / Log pane
@@ -165,3 +173,7 @@ Press `?` inside the app for context-sensitive help.
 | Key | Action |
 |-----|--------|
 | `space` / `enter` | Checkout workspace to selected CL |
+
+## Development checks
+
+Run `go test ./...` and `go vet ./...`. Native configuration tests run when `p4` is in PATH. Set `LAZYP4_TEST_P4D` to a `p4d` executable to also run server integration tests against temporary loopback servers and workspaces. CI runs these separately from the platform test matrix.

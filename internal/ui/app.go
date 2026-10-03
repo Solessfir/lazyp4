@@ -36,9 +36,9 @@ const (
 
 // submitModal is the centered overlay for writing a submit description.
 type submitModal struct {
-	input   textinput.Model
-	clID    string          // non-empty = full CL submit
-	files   []p4.OpenedFile // non-empty = marked files submit
+	input textinput.Model
+	clID  string          // non-empty = full CL submit
+	files []p4.OpenedFile // non-empty = marked files submit
 }
 
 type confirmKind int
@@ -46,13 +46,15 @@ type confirmKind int
 const (
 	confirmKindRevert confirmKind = iota
 	confirmKindDeleteShelf
+	confirmKindResolve
 )
 
 type confirmModal struct {
 	kind          confirmKind
 	files         []string // client paths to revert
 	localToDelete []string // local paths to delete after revert (ActionAdd files only)
-	clID          string   // for delete shelf
+	clID          string   // changelist scope for revert or shelf deletion
+	resolveFlags  []string
 }
 
 // shelveDescModal is shown when shelving files from the default CL so the user can name the new CL.
@@ -70,10 +72,10 @@ type moveCLModal struct {
 
 // checkoutModal is shown when the user wants to sync the workspace to a specific CL.
 type checkoutModal struct {
-	cl        string // target CL number
-	stream    string // stream root path
-	hasFiles  bool   // true = open files exist, show shelve prompt first
-	shelving  bool   // true = currently in "shelve then sync" phase
+	cl       string // target CL number
+	stream   string // stream root path
+	hasFiles bool   // true = open files exist, show shelve prompt first
+	shelving bool   // true = currently in "shelve then sync" phase
 }
 
 // streamSwitchModal tracks an in-progress p4 switch invocation.
@@ -86,6 +88,7 @@ type streamSwitchModal struct {
 // For streams it shows pull/push options relative to the current stream's parent;
 // for classic depots it collects source and target paths.
 type integrateModal struct {
+	sourceStream string
 	parentStream string // stream depots: parent of current stream (for display)
 	isClassic    bool   // true = classic depot, show path inputs
 	step         int    // classic only: 0=source input, 1=target input
@@ -93,8 +96,8 @@ type integrateModal struct {
 	targetInput  textinput.Model
 }
 
-func newIntegrateModalStream(parent string) *integrateModal {
-	return &integrateModal{parentStream: parent}
+func newIntegrateModalStream(source, parent string) *integrateModal {
+	return &integrateModal{sourceStream: source, parentStream: parent}
 }
 
 func newIntegrateModalClassic() *integrateModal {
@@ -138,16 +141,19 @@ type refreshDoneMsg struct {
 }
 
 type diffDoneMsg struct {
+	request uint64
 	content string
 	err     error
 }
 
 type logDoneMsg struct {
+	request uint64
 	entries []p4.FilelogEntry
 	err     error
 }
 
 type browserLoadedMsg struct {
+	epoch      uint64
 	parentPath string
 	dirs       []string
 	files      []string // depot mode only
@@ -156,6 +162,7 @@ type browserLoadedMsg struct {
 }
 
 type browserFastMsg struct {
+	epoch      uint64
 	parentPath string
 	dirs       []string
 	files      []p4.WorkspaceEntry
@@ -163,6 +170,7 @@ type browserFastMsg struct {
 }
 
 type browserStatusMsg struct {
+	epoch        uint64
 	parentPath   string
 	haveFiles    []string
 	depotDirs    []string
@@ -172,11 +180,13 @@ type browserStatusMsg struct {
 }
 
 type browserSearchDoneMsg struct {
+	epoch uint64
 	files []string
 	err   error
 }
 
 type conflictsDoneMsg struct {
+	request   uint64
 	conflicts []p4.ConflictFile
 	err       error
 }
@@ -231,6 +241,7 @@ type deleteShelfDoneMsg struct {
 }
 
 type syncDryDoneMsg struct {
+	id    uint64
 	total int
 	err   error
 }
@@ -272,26 +283,44 @@ type integrateDoneMsg struct {
 	err error
 }
 
-type opLineMsg struct{ line string }
-type opEndMsg struct{ err error }
+type opLineMsg struct {
+	id   uint64
+	line string
+}
+
+type browserNavigateMsg struct {
+	epoch uint64
+	path  string
+	err   error
+}
+type opEndMsg struct {
+	id  uint64
+	err error
+}
+
+type resolveDoneMsg struct {
+	id  uint64
+	err error
+}
 
 type authRequiredMsg struct{}
 type authDoneMsg struct{ err error }
 
 // App is the root bubbletea model.
 type App struct {
-	client          *p4.Client
-	fetchInterval   time.Duration
+	client           *p4.Client
+	fetchInterval    time.Duration
 	linuxFileManager string // empty = auto-detect
-	active        activePane
+	active           activePane
 
 	// operation in progress (sync or submit)
-	opRunning bool
-	opName    string // "Syncing" or "Submitting"
-	opTotal   int
-	opDone    int
-	opCancel  context.CancelFunc
-	opCh      chan string
+	opRunning   bool
+	opName      string // "Syncing" or "Submitting"
+	opTotal     int
+	opDone      int
+	opCancel    context.CancelFunc
+	opCh        chan string
+	opID        uint64
 	statusPane  *panes.StatusPane
 	browserPane *panes.BrowserPane
 	fileList    *panes.FileListPane
@@ -303,12 +332,17 @@ type App struct {
 	cmdLog      *panes.CmdLogPane
 
 	streams          []p4.StreamInfo
-	showStreams       bool   // true when stream depot with >1 stream
+	showStreams      bool   // true when stream depot with >1 stream
 	isStreamDepot    bool   // false = classic depot (no streams)
 	browserNavTarget string // pending nav-to path after filter clear
+	browserEpoch     uint64
 	historyMode      bool   // true = show History pane at bottom-right, false = Diff
 	logPath          string // last path loaded into the history pane
 	logMax           int    // last max passed to cmdFilelogMax (0 = unlimited)
+	diffRequest      uint64
+	logRequest       uint64
+	resolveRequest   uint64
+	resolvePath      string
 	syncPath         string // depot path used for the current/last sync
 	pinnedCL         string // non-empty when synced to a specific CL instead of HEAD
 	offlineMode      bool   // true = p4 server unreachable
@@ -316,18 +350,18 @@ type App struct {
 	width  int
 	height int
 
-	status       string
-	modal        *submitModal
-	shelveModal  *shelveDescModal
-	moveModal    *moveCLModal
-	confirm      *confirmModal
-	checkout     *checkoutModal
-	streamSwitch    *streamSwitchModal
-	integrateModal  *integrateModal
-	authModal       *authModal
-	showHelp     bool
-	selectMode   bool // mouse disabled so terminal can select text
-	helpViewport viewport.Model
+	status         string
+	modal          *submitModal
+	shelveModal    *shelveDescModal
+	moveModal      *moveCLModal
+	confirm        *confirmModal
+	checkout       *checkoutModal
+	streamSwitch   *streamSwitchModal
+	integrateModal *integrateModal
+	authModal      *authModal
+	showHelp       bool
+	selectMode     bool // mouse disabled so terminal can select text
+	helpViewport   viewport.Model
 }
 
 // New creates the root App model.
@@ -341,17 +375,17 @@ func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string
 		client:           client,
 		fetchInterval:    fetchInterval,
 		linuxFileManager: linuxFileManager,
-		active:        paneBrowser,
-		statusPane:  panes.NewStatusPane(),
-		browserPane: panes.NewBrowserPane(),
-		fileList:    fl,
-		streamsPane: panes.NewStreamsPane(),
-		shelvedPane: panes.NewShelvedPane(),
-		diff:        panes.NewDiffPane(),
-		log:         panes.NewLogPane("5", "History"),
-		resolve:     panes.NewResolvePane(),
-		cmdLog:      panes.NewCmdLogPane(),
-		helpViewport:  hv,
+		active:           paneBrowser,
+		statusPane:       panes.NewStatusPane(),
+		browserPane:      panes.NewBrowserPane(),
+		fileList:         fl,
+		streamsPane:      panes.NewStreamsPane(),
+		shelvedPane:      panes.NewShelvedPane(),
+		diff:             panes.NewDiffPane(),
+		log:              panes.NewLogPane("5", "History"),
+		resolve:          panes.NewResolvePane(),
+		cmdLog:           panes.NewCmdLogPane(),
+		helpViewport:     hv,
 	}
 	a.historyMode = true
 	a.updateFocus()
@@ -369,6 +403,9 @@ func (a *App) Init() tea.Cmd {
 
 // Update is the main message handler.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, mouse := msg.(tea.MouseMsg); mouse && (a.authModal != nil || a.integrateModal != nil || a.streamSwitch != nil || a.checkout != nil || a.confirm != nil || a.moveModal != nil || a.shelveModal != nil || a.modal != nil) {
+		return a, nil
+	}
 	// Auth modal captures all key input when open.
 	if a.authModal != nil {
 		if m, ok := msg.(tea.KeyMsg); ok {
@@ -390,8 +427,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Checkout modal captures all input when open.
-	if a.checkout != nil {
+	_, keyInput := msg.(tea.KeyMsg)
+	// Modals consume keys; asynchronous results still reach the dispatcher.
+	if a.checkout != nil && keyInput {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			co := a.checkout
 			switch m.String() {
@@ -410,8 +448,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Confirm modal captures all input when open.
-	if a.confirm != nil {
+	if a.confirm != nil && keyInput {
 		if m, ok := msg.(tea.KeyMsg); ok {
 			switch m.String() {
 			case "enter", "y", "Y", "l":
@@ -419,15 +456,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.confirm = nil
 				switch c.kind {
 				case confirmKindRevert:
-					return a, a.cmdRevert(c.files)
+					return a, a.cmdRevert(c.files, c.clID)
 				case confirmKindDeleteShelf:
 					return a, a.cmdDeleteShelf(c.clID)
+				case confirmKindResolve:
+					return a, a.cmdAutoResolve(c.files, c.resolveFlags)
 				}
 			case "d":
 				if a.confirm != nil && len(a.confirm.localToDelete) > 0 {
 					c := a.confirm
 					a.confirm = nil
-					return a, a.cmdRevertAndDeleteLocal(c.files, c.localToDelete)
+					return a, a.cmdRevertAndDeleteLocal(c.files, c.localToDelete, c.clID)
 				}
 			case "esc", "ctrl+c", "n", "N", "h":
 				a.confirm = nil
@@ -437,8 +476,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Move CL modal captures all input when open.
-	if a.moveModal != nil {
+	if a.moveModal != nil && keyInput {
 		switch m := msg.(type) {
 		case tea.KeyMsg:
 			switch m.String() {
@@ -460,8 +498,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Shelve description modal captures all input when open.
-	if a.shelveModal != nil {
+	if a.shelveModal != nil && keyInput {
 		switch m := msg.(type) {
 		case tea.KeyMsg:
 			switch m.String() {
@@ -483,8 +520,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Modal captures all input when open.
-	if a.modal != nil {
+	if a.modal != nil && keyInput {
 		switch m := msg.(type) {
 		case tea.KeyMsg:
 			switch m.String() {
@@ -544,7 +580,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Loaded %d changelists", len(m.cls))
 			a.cmdLog.Add("p4 opened", fmt.Sprintf("%d changelists", len(m.cls)))
 			a.relayout() // pending height changes
-			if f := a.fileList.SelectedFile(); f != nil {
+			if f := a.fileList.SelectedFile(); f != nil && a.active == paneFileList {
 				var cmds []tea.Cmd
 				cmds = append(cmds, a.cmdDiff(f.ClientFile))
 				// Only refresh history from Pending if the user is actively in that pane,
@@ -566,6 +602,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case diffDoneMsg:
+		if m.request != a.diffRequest {
+			return a, nil
+		}
 		if m.err != nil {
 			a.status = "diff error: " + m.err.Error()
 		} else {
@@ -574,6 +613,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case logDoneMsg:
+		if m.request != a.logRequest {
+			return a, nil
+		}
 		if m.err != nil {
 			a.status = "filelog error: " + m.err.Error()
 		} else {
@@ -582,6 +624,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case conflictsDoneMsg:
+		if m.request != a.resolveRequest {
+			return a, nil
+		}
 		if m.err != nil {
 			a.status = "resolve error: " + m.err.Error()
 		} else {
@@ -601,17 +646,47 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Err != nil {
 			a.status = "merge tool error: " + m.Err.Error()
 		}
-		return a, a.cmdResolveList("")
+		return a, a.cmdResolveList(a.resolvePath)
+
+	case panes.ResolveInteractiveMsg:
+		if a.opRunning {
+			return a, nil
+		}
+		cmd, err := a.client.ResolveCommand(m.File)
+		if err != nil {
+			a.status = "resolve failed: " + err.Error()
+			return a, nil
+		}
+		a.opRunning = true
+		a.opName = "Resolving"
+		a.opID++
+		id := a.opID
+		return a, tea.ExecProcess(cmd, func(err error) tea.Msg { return resolveDoneMsg{id: id, err: err} })
 
 	case panes.ResolveAutoMsg:
-		return a, func() tea.Msg {
-			if err := a.client.AutoResolve("", m.Flags); err != nil {
-				a.cmdLog.Add("p4 resolve", "error: "+err.Error())
-				return statusMsg{"auto-resolve failed — see log"}
-			}
-			conflicts, err := a.client.ResolveList("")
-			return conflictsDoneMsg{conflicts: conflicts, err: err}
+		if a.opRunning || len(m.Files) == 0 {
+			return a, nil
 		}
+		for _, flag := range m.Flags {
+			if flag == "-at" || flag == "-ay" {
+				a.confirm = &confirmModal{kind: confirmKindResolve, files: m.Files, resolveFlags: m.Flags}
+				return a, nil
+			}
+		}
+		return a, a.cmdAutoResolve(m.Files, m.Flags)
+
+	case resolveDoneMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
+		a.opRunning = false
+		if m.err != nil {
+			a.status = "resolve failed: " + m.err.Error()
+			a.cmdLog.Add("p4 resolve", "error: "+m.err.Error())
+		} else {
+			a.cmdLog.Add("p4 resolve", "done")
+		}
+		return a, a.cmdResolveList(a.resolvePath)
 
 	case statusMsg:
 		a.status = m.text
@@ -623,6 +698,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case submitReadyMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
+		if m.err != nil {
+			a.opRunning = false
+			a.status = "submit preparation failed: " + m.err.Error()
+			a.cmdLog.Add("p4 submit", "error: "+m.err.Error())
+			return a, nil
+		}
 		if len(m.files) == 0 {
 			a.opRunning = false
 			a.status = "Nothing to submit — all files were unchanged"
@@ -631,6 +715,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdSubmitMarkedStart(m.files, m.description)
 
 	case syncDryDoneMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
 		if m.err != nil {
 			a.opRunning = false
 			a.status = "sync dry-run failed: " + m.err.Error()
@@ -638,26 +725,42 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.opTotal = 0 // CL count from dry-run != file count; leave unknown
 		a.opDone = 0
+		client := *a.client
 		return a, a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
-			err := a.client.SyncStreaming(ctx, ch)
+			err := client.SyncStreaming(ctx, ch)
 			ch <- opErrLine(err)
 			close(ch)
 		})
 
 	case opLineMsg:
-		a.opDone++
+		if m.id != a.opID {
+			return a, nil
+		}
+		fields := strings.Fields(m.line)
+		if len(fields) > 0 && (strings.HasPrefix(fields[0], "//") || len(fields) > 1 && strings.HasPrefix(fields[1], "//")) {
+			a.opDone++
+		}
 		return a, a.cmdReadOpLine()
 
 	case opEndMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
 		opName := a.opName
 		opDone := a.opDone
 		opTotal := a.opTotal
 		a.opRunning = false
-		a.opCancel = nil
+		if a.opCancel != nil {
+			a.opCancel()
+			a.opCancel = nil
+		}
 		a.opCh = nil
-		p4cmd := "p4 " + strings.ToLower(opName)
-		if opName == "Syncing" && a.syncPath != "" {
-			p4cmd = "p4 sync " + a.syncPath
+		p4cmd := "p4 submit"
+		if opName == "Syncing" {
+			p4cmd = "p4 sync"
+			if a.syncPath != "" {
+				p4cmd += " " + a.syncPath
+			}
 		}
 		var cmds []tea.Cmd
 		if m.err != nil && m.err != context.Canceled {
@@ -668,7 +771,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.cmdLog.Add(p4cmd, "cancelled")
 		} else {
 			fileCount := opDone
-			if opName == "Submitting" {
+			if opName == "Submitting" && fileCount == 0 && opTotal > 0 {
 				fileCount = opTotal
 			}
 			if opName == "Syncing" && a.syncPath != "" {
@@ -681,7 +784,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.cmdLog.Add(p4cmd, fmt.Sprintf("%d files", fileCount))
 		}
-		if opName == "Submitting" {
+		if opName == "Submitting" && m.err == nil {
 			a.fileList.ClearMarks()
 			cmds = append(cmds, a.cmdFetch())
 		}
@@ -700,9 +803,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case revertCheckMsg:
 		if m.hasChanges {
-			a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{m.clientFile}}
+			a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{m.clientFile}, clID: m.clID}
 		} else {
-			return a, a.cmdRevert([]string{m.clientFile})
+			return a, a.cmdRevert([]string{m.clientFile}, m.clID)
 		}
 		return a, nil
 
@@ -786,14 +889,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.client.Port = m.info.ServerAddr
 			}
 			a.statusPane.SetInfo(m.info)
+			a.browserEpoch++
+			a.browserNavTarget = ""
+			depotRoot := m.info.Stream
+			if depotRoot == "" {
+				depotRoot = "//"
+			}
+			a.browserPane.SetRoots(depotRoot, "//"+a.client.Workspace)
 			var cmds []tea.Cmd
 			cmds = append(cmds, a.cmdFetchCurrentCL())
 			if m.info.Stream != "" {
 				a.isStreamDepot = true
 				cmds = append(cmds, a.cmdStreams(m.info.Stream))
-				a.browserPane.SetRoot(m.info.Stream)
-				cmds = append(cmds, a.cmdBrowserLoad(m.info.Stream, a.browserPane.Mode()))
-				cmds = append(cmds, a.cmdBrowserSearch(m.info.Stream, a.browserPane.Mode()))
+				root := a.browserPane.RootPath()
+				cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
+				cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
 				if a.historyMode {
 					cmds = append(cmds, a.cmdFilelogMax(m.info.Stream+"/...", 100))
 				}
@@ -801,8 +911,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Classic depot: no streams, use // as browser root.
 				// Skip search index (//... could be enormous).
 				a.isStreamDepot = false
-				a.browserPane.SetRoot("//")
-				cmds = append(cmds, a.cmdBrowserLoad("//", a.browserPane.Mode()))
+				root := a.browserPane.RootPath()
+				cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
+				if a.browserPane.Mode() == panes.BrowserModeWorkspace {
+					cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
+				}
 				if a.historyMode {
 					cmds = append(cmds, a.cmdFilelogMax("//...", 100))
 				}
@@ -848,6 +961,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdBrowserLoad(m.Path, m.Mode)
 
 	case browserLoadedMsg:
+		if m.epoch != a.browserEpoch {
+			return a, nil
+		}
 		if m.err != nil {
 			a.status = "browser load failed: " + m.err.Error()
 			return a, nil
@@ -875,6 +991,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case browserFastMsg:
+		if m.epoch != a.browserEpoch {
+			return a, nil
+		}
 		if m.err == nil {
 			autoExpand := a.browserPane.LoadChildrenFast(m.parentPath, m.dirs, m.files)
 			a.relayout()
@@ -894,6 +1013,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case browserStatusMsg:
+		if m.epoch != a.browserEpoch {
+			return a, nil
+		}
 		if m.err != nil {
 			a.status = "browser load failed: " + m.err.Error()
 			return a, nil
@@ -924,8 +1046,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdBrowserSearch(m.Root, m.Mode)
 
 	case browserSearchDoneMsg:
+		if m.epoch != a.browserEpoch {
+			return a, nil
+		}
 		if m.err == nil {
 			a.browserPane.LoadSearchIndex(m.files)
+		}
+		return a, nil
+
+	case browserNavigateMsg:
+		if m.epoch != a.browserEpoch || m.err != nil {
+			return a, nil
+		}
+		a.browserNavTarget = m.path
+		if a.browserPane.NavigateTo(m.path) {
+			a.browserNavTarget = ""
+		} else if next := a.browserPane.FirstUnloadedAncestor(m.path); next != "" {
+			return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
 		}
 		return a, nil
 
@@ -1080,7 +1217,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return a.handleKey(m)
 	}
-	return a, nil
+	var cmd tea.Cmd
+	switch {
+	case a.authModal != nil:
+		a.authModal.input, cmd = a.authModal.input.Update(msg)
+	case a.integrateModal != nil && a.integrateModal.isClassic:
+		if a.integrateModal.step == 0 {
+			a.integrateModal.sourceInput, cmd = a.integrateModal.sourceInput.Update(msg)
+		} else {
+			a.integrateModal.targetInput, cmd = a.integrateModal.targetInput.Update(msg)
+		}
+	case a.moveModal != nil:
+		a.moveModal.input, cmd = a.moveModal.input.Update(msg)
+	case a.shelveModal != nil:
+		a.shelveModal.input, cmd = a.shelveModal.input.Update(msg)
+	case a.modal != nil:
+		a.modal.input, cmd = a.modal.input.Update(msg)
+	}
+	return a, cmd
 }
 
 func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1141,6 +1295,18 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if a.opRunning {
+		switch m.String() {
+		case "p", "P", "s", "e", "E", "d", "u", "D", "F", "m", "R", "a", "i", "y":
+			a.status = a.opName + " in progress"
+			return a, nil
+		}
+		if (m.String() == "enter" || m.String() == "l") && (a.active == paneStreams || a.active == paneLog) || m.String() == " " && a.active == paneBrowser {
+			a.status = a.opName + " in progress"
+			return a, nil
+		}
+	}
+
 	// Resolve pane captures its own keys before any global handler.
 	if a.active == paneResolve {
 		if m.String() == "esc" {
@@ -1166,6 +1332,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.selectMode = true
 		return a, tea.DisableMouse
 	case "q", "ctrl+c":
+		if a.opCancel != nil {
+			a.opCancel()
+		}
 		return a, tea.Quit
 	case "i":
 		if !a.isStreamDepot {
@@ -1175,11 +1344,15 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.active != paneStreams {
 			return a, nil
 		}
-		if parent := a.currentStreamParent(); parent != "" {
-			a.integrateModal = newIntegrateModalStream(parent)
+		source := a.streamsPane.SelectedStream()
+		if source == "" {
+			source = a.client.Stream
+		}
+		if parent := a.streamParent(source); parent != "" {
+			a.integrateModal = newIntegrateModalStream(source, parent)
 			return a, nil
 		}
-		a.status = "Current stream has no parent to integrate with"
+		a.status = "Selected stream has no parent to integrate with"
 		return a, nil
 	case "r":
 		a.status = "Refreshing..."
@@ -1196,16 +1369,28 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.status = "Fetching..."
 		return a, a.cmdFetch()
 	case "b":
-		// Remember selected file so we can navigate to it in the new mode.
-		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
-			a.browserNavTarget = sel.DepotPath
-		}
+		sel := a.browserPane.SelectedEntry()
+		a.browserEpoch++
+		a.browserNavTarget = ""
 		a.browserPane.ToggleMode()
 		if path := a.browserPane.RootPath(); path != "" {
-			return a, tea.Batch(
+			cmds := []tea.Cmd{
 				a.cmdBrowserLoad(path, a.browserPane.Mode()),
 				a.cmdBrowserSearch(path, a.browserPane.Mode()),
-			)
+			}
+			if sel != nil && !sel.IsDir {
+				epoch := a.browserEpoch
+				client := *a.client
+				if a.browserPane.Mode() == panes.BrowserModeWorkspace {
+					cmds = append(cmds, func() tea.Msg {
+						path, err := client.WhereClient(sel.DepotPath)
+						return browserNavigateMsg{epoch: epoch, path: path, err: err}
+					})
+				} else if !strings.HasPrefix(sel.DepotPath, "//"+client.Workspace+"/") {
+					a.browserNavTarget = sel.DepotPath
+				}
+			}
+			return a, tea.Batch(cmds...)
 		}
 		return a, nil
 	case "o":
@@ -1296,9 +1481,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 				if f.Action != p4.ActionEdit {
-					return a, a.cmdRevert([]string{f.ClientFile})
+					return a, a.cmdRevert([]string{f.ClientFile}, "")
 				}
-				return a, a.cmdRevertCheck(f.ClientFile)
+				return a, a.cmdRevertCheck(f.ClientFile, "")
 			} else if clID := a.fileList.SelectedCL(); clID != "" {
 				cls := a.fileList.FilesForCL(clID)
 				if len(cls) == 0 {
@@ -1309,13 +1494,13 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 					f := cls[0]
 					if f.Action == p4.ActionAdd {
 						local := clientToLocal(a.client.Root, a.client.Workspace, f.ClientFile)
-						a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}, localToDelete: []string{local}}
+						a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{f.ClientFile}, localToDelete: []string{local}, clID: clID}
 						return a, nil
 					}
 					if f.Action != p4.ActionEdit {
-						return a, a.cmdRevert([]string{f.ClientFile})
+						return a, a.cmdRevert([]string{f.ClientFile}, clID)
 					}
-					return a, a.cmdRevertCheck(f.ClientFile)
+					return a, a.cmdRevertCheck(f.ClientFile, clID)
 				}
 				files := make([]string, len(cls))
 				for i, ff := range cls {
@@ -1325,6 +1510,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 					kind:          confirmKindRevert,
 					files:         files,
 					localToDelete: localPathsForAdds(a.client.Root, a.client.Workspace, cls),
+					clID:          clID,
 				}
 			} else {
 				a.status = "No file selected"
@@ -1476,7 +1662,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if f := a.fileList.SelectedFile(); f != nil {
 			resolvePath = f.ClientFile
 		} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
-			resolvePath = dp + "/..."
+			resolvePath = dp
 		}
 		return a, a.cmdResolveList(resolvePath)
 	case "e", "E":
@@ -1575,9 +1761,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 						return a, nil
 					}
 					if found.Action != p4.ActionEdit {
-						return a, a.cmdRevert([]string{found.ClientFile})
+						return a, a.cmdRevert([]string{found.ClientFile}, "")
 					}
-					return a, a.cmdRevertCheck(found.ClientFile)
+					return a, a.cmdRevertCheck(found.ClientFile, "")
 				}
 			}
 			return a, nil
@@ -1723,10 +1909,10 @@ func (a *App) handleIntegrateKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.String() {
 		case "m":
 			a.integrateModal = nil
-			return a, a.cmdMergeStream("")
+			return a, a.cmdPullStream(im.sourceStream)
 		case "c":
 			a.integrateModal = nil
-			return a, a.cmdCopyStream("")
+			return a, a.cmdPromoteStream(im.sourceStream)
 		}
 		return a, nil
 	}
@@ -1768,17 +1954,17 @@ func (a *App) handleAuthKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.status = "Login cancelled"
 		return a, nil
 	case "enter", "ctrl+enter":
-		save := m.String() == "ctrl+enter"
+		save := m.String() == "ctrl+enter" && a.client.StorePassword
 		password := a.authModal.input.Value()
+		client := *a.client
 		a.authModal = nil
 		a.status = "Logging in..."
 		return a, func() tea.Msg {
-			if err := a.client.Login(password); err != nil {
+			if err := client.Login(password); err != nil {
 				return authDoneMsg{err: err}
 			}
 			if save {
-				user := a.client.User
-				if err := p4.KeyringSet(user, password); err != nil {
+				if err := client.StoreCredential(password); err != nil {
 					return authDoneMsg{err: fmt.Errorf("login ok but keychain save failed: %w", err)}
 				}
 			}
@@ -1824,6 +2010,7 @@ func (a *App) filesToShelve() []p4.OpenedFile {
 }
 
 func (a *App) execShelveWithDesc() tea.Cmd {
+	client := *a.client
 	m := a.shelveModal
 	a.shelveModal = nil
 	desc := strings.TrimSpace(m.input.Value())
@@ -1832,25 +2019,25 @@ func (a *App) execShelveWithDesc() tea.Cmd {
 	}
 	files := m.files
 	noRevert := m.noRevert
+	clientFiles := make([]string, len(files))
+	for i, f := range files {
+		clientFiles[i] = f.ClientFile
+	}
 	return func() tea.Msg {
-		clID, err := a.client.CreateChange(desc)
+		clID, err := client.CreateChange(desc)
 		if err != nil {
 			return shelveDoneMsg{err: err}
 		}
 		for _, f := range files {
-			if _, err := a.client.Reopen(clID, f.ClientFile); err != nil {
+			if _, err := client.Reopen(clID, f.ClientFile); err != nil {
 				return shelveDoneMsg{err: err}
 			}
 		}
-		if _, err := a.client.Shelve(clID); err != nil {
+		if _, err := client.ShelveFiles(clID, clientFiles); err != nil {
 			return shelveDoneMsg{err: err}
 		}
 		if !noRevert {
-			clientFiles := make([]string, len(files))
-			for i, f := range files {
-				clientFiles[i] = f.ClientFile
-			}
-			if _, err := a.client.RevertFiles(clientFiles); err != nil {
+			if _, err := client.RevertFiles(clientFiles); err != nil {
 				return shelveDoneMsg{err: err}
 			}
 		}
@@ -2238,7 +2425,6 @@ var (
 
 	styleModalHint = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
-
 )
 
 func (a *App) renderProgressBar() string {
@@ -2401,19 +2587,22 @@ func (a *App) renderCheckoutModal() string {
 }
 
 func (a *App) renderAuthModal() string {
+	hint := "enter - login   esc - cancel"
+	if a.client.StorePassword {
+		hint = "enter - login   ctrl+enter - login & remember   esc - cancel"
+	}
 	content := styleModalTitle.Render("Session expired") +
 		"\n\n" +
 		a.authModal.input.View() +
 		"\n\n" +
-		styleModalHint.Render("enter - login   ctrl+enter - login & remember   esc - cancel")
+		styleModalHint.Render(hint)
 	return styleModalBox.Render(content)
 }
 
-// currentStreamParent returns the parent stream path of the current workspace stream,
-// or "" if the current stream is a root (e.g. mainline) with no parent.
-func (a *App) currentStreamParent() string {
+// streamParent returns the parent of a known stream, or empty for a mainline.
+func (a *App) streamParent(stream string) string {
 	for _, s := range a.streams {
-		if s.Path == a.client.Stream && s.Parent != "" && s.Parent != "none" {
+		if s.Path == stream && s.Parent != "" && s.Parent != "none" {
 			return s.Parent
 		}
 	}
@@ -2430,7 +2619,7 @@ func (a *App) renderIntegrateModal() string {
 			return p
 		}
 		parent := shortName(im.parentStream)
-		current := shortName(a.client.Stream)
+		current := shortName(im.sourceStream)
 		content := styleModalTitle.Render("Integrate") +
 			"\n\n" +
 			styleModalHint.Render(
@@ -2469,6 +2658,16 @@ func (a *App) renderConfirmModal() string {
 	case confirmKindDeleteShelf:
 		title = "Delete shelf?"
 		desc = styleStatus.Render(fmt.Sprintf("CL %s", a.confirm.clID))
+	case confirmKindResolve:
+		title = "Accept yours?"
+		desc = "Incoming changes will be discarded."
+		for _, flag := range a.confirm.resolveFlags {
+			if flag == "-at" {
+				title = "Accept theirs?"
+				desc = "Local changes will be discarded."
+			}
+		}
+		desc = styleStatus.Render(fmt.Sprintf("%s\n%d selected conflict(s)", desc, len(a.confirm.files)))
 	default:
 		title = "Discard changes?"
 		if len(a.confirm.files) == 1 {
@@ -2641,10 +2840,13 @@ func (a *App) helpContent() string {
 // --- async commands ---
 
 func (a *App) cmdInfo() tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
 		// Auto-login from keychain before fetching info.
-		_ = a.client.EnsureLoggedIn(nil) // nil = no interactive prompt; modal handles that
-		info, err := a.client.Info()
+		if err := client.EnsureLoggedIn(nil); err != nil && p4.IsAuthError(err) {
+			return authRequiredMsg{}
+		}
+		info, err := client.Info()
 		if err != nil && p4.IsAuthError(err) {
 			return authRequiredMsg{}
 		}
@@ -2653,50 +2855,57 @@ func (a *App) cmdInfo() tea.Cmd {
 }
 
 func (a *App) cmdLoadShelved() tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		cls, err := a.client.ShelvedCLs()
+		cls, err := client.ShelvedCLs()
 		return shelvedDoneMsg{cls: cls, err: err}
 	}
 }
 
 func (a *App) cmdUnshelveAndDelete(clID string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		err := a.client.UnshelveAndDelete(clID)
+		err := client.UnshelveAndDelete(clID)
 		return unshelveDeleteDoneMsg{clID: clID, err: err}
 	}
 }
 
 func (a *App) cmdDeleteShelf(clID string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		err := a.client.DeleteShelf(clID)
+		err := client.DeleteShelf(clID)
 		return deleteShelfDoneMsg{clID: clID, err: err}
 	}
 }
 
 func (a *App) cmdStreams(streamPath string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
 		depotPath := p4.DepotFromStream(streamPath)
-		streams, err := a.client.Streams(depotPath)
+		streams, err := client.Streams(depotPath)
 		return streamsFetchedMsg{streams: streams, err: err}
 	}
 }
 
 func (a *App) cmdFetchCurrentCL() tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		return currentCLFetchedMsg{cl: a.client.CurrentCL()}
+		return currentCLFetchedMsg{cl: client.CurrentCL()}
 	}
 }
 
 func (a *App) cmdFetch() tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		count, err := a.client.SyncDryRun()
+		count, err := client.SyncDryRun()
 		return fetchDoneMsg{count: count, err: err}
 	}
 }
 
 func (a *App) refresh() tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		files, err := a.client.OpenedFiles()
+		files, err := client.OpenedFiles()
 		if err != nil {
 			if p4.IsAuthError(err) {
 				return authRequiredMsg{}
@@ -2704,13 +2913,13 @@ func (a *App) refresh() tea.Cmd {
 			return refreshDoneMsg{err: err}
 		}
 		// Mark files that need resolve.
-		if conflicts, err := a.client.ResolveList(""); err == nil && len(conflicts) > 0 {
+		if conflicts, err := client.ResolveList(""); err == nil && len(conflicts) > 0 {
 			// Conflict paths may be local (/tmp/root/rel) or depot (//depot/rel).
 			// Opened file ClientFile is //clientname/rel.
 			// Normalise both to their relative suffix for comparison.
 			relPath := func(p string) string {
-				if a.client.Root != "" {
-					if rel := strings.TrimPrefix(p, a.client.Root+"/"); rel != p {
+				if client.Root != "" {
+					if rel := strings.TrimPrefix(p, client.Root+"/"); rel != p {
 						return rel
 					}
 				}
@@ -2732,14 +2941,20 @@ func (a *App) refresh() tea.Cmd {
 			}
 		}
 		// Mark edit files that have actual local changes vs the have revision.
-		diffStatus := a.client.FilesDiffStatus()
+		diffStatus, err := client.FilesDiffStatus()
+		if err != nil {
+			if p4.IsAuthError(err) {
+				return authRequiredMsg{}
+			}
+			return refreshDoneMsg{err: err}
+		}
 		for i := range files {
 			if files[i].Action == p4.ActionEdit {
 				files[i].HasChanges = diffStatus[files[i].DepotFile]
 			}
 		}
 		cls := p4.GroupByChangelist(files)
-		if descs, err := a.client.PendingDescriptions(); err == nil {
+		if descs, err := client.PendingDescriptions(); err == nil {
 			for i, cl := range cls {
 				if desc, ok := descs[cl.ID]; ok {
 					cls[i].Description = desc
@@ -2751,9 +2966,13 @@ func (a *App) refresh() tea.Cmd {
 }
 
 func (a *App) cmdDiff(clientFile string) tea.Cmd {
+	a.diffRequest++
+	request := a.diffRequest
+	client := *a.client
+	a.diff.SetContent("")
 	return func() tea.Msg {
-		out, err := a.client.Diff(clientFile)
-		return diffDoneMsg{content: out, err: err}
+		out, err := client.Diff(clientFile)
+		return diffDoneMsg{request: request, content: out, err: err}
 	}
 }
 
@@ -2791,15 +3010,19 @@ func (a *App) cmdFilelog(depotFile string) tea.Cmd {
 func (a *App) cmdFilelogMax(depotFile string, max int) tea.Cmd {
 	a.logPath = depotFile
 	a.logMax = max
+	a.logRequest++
+	request := a.logRequest
+	client := *a.client
+	a.log.SetEntries(nil)
 	return func() tea.Msg {
 		var entries []p4.FilelogEntry
 		var err error
 		if strings.HasSuffix(depotFile, "/...") || strings.HasSuffix(depotFile, "...") {
-			entries, err = a.client.Changes(depotFile, max)
+			entries, err = client.Changes(depotFile, max)
 		} else {
-			entries, err = a.client.Filelog(depotFile, max)
+			entries, err = client.Filelog(depotFile, max)
 		}
-		return logDoneMsg{entries: entries, err: err}
+		return logDoneMsg{request: request, entries: entries, err: err}
 	}
 }
 
@@ -2813,26 +3036,30 @@ func depotWildcard(root string) string {
 }
 
 func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
+	epoch := a.browserEpoch
+	client := *a.client
 	return func() tea.Msg {
 		wildcard := depotWildcard(root)
 		var files []string
 		var err error
 		if mode == panes.BrowserModeWorkspace {
-			files, err = a.client.BrowserHaveFiles(wildcard)
+			files, err = client.BrowserWorkspaceFiles(wildcard)
 		} else {
-			files, err = a.client.BrowserDepotFiles(wildcard)
+			files, err = client.BrowserDepotFiles(wildcard)
 		}
-		return browserSearchDoneMsg{files: files, err: err}
+		return browserSearchDoneMsg{epoch: epoch, files: files, err: err}
 	}
 }
 
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
+	epoch := a.browserEpoch
+	client := *a.client
 	wildcard := path + "/*"
 	if mode == panes.BrowserModeWorkspace {
 		return tea.Batch(
 			func() tea.Msg {
-				dirs, files, err := a.client.BrowserWorkspaceFast(path)
-				return browserFastMsg{parentPath: path, dirs: dirs, files: files, err: err}
+				dirs, files, err := client.BrowserWorkspaceFast(path)
+				return browserFastMsg{epoch: epoch, parentPath: path, dirs: dirs, files: files, err: err}
 			},
 			func() tea.Msg {
 				var haveFiles, depotDirs []string
@@ -2843,11 +3070,11 @@ func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 				wg.Add(2)
 				go func() {
 					defer wg.Done()
-					haveFiles, depotDirs, missingFiles, statusErr = a.client.BrowserWorkspaceStatus(path)
+					haveFiles, depotDirs, missingFiles, statusErr = client.BrowserWorkspaceStatus(path)
 				}()
-				go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
+				go func() { defer wg.Done(); othersOpen, _ = client.OpenedByOthers(wildcard) }()
 				wg.Wait()
-				return browserStatusMsg{parentPath: path, haveFiles: haveFiles, depotDirs: depotDirs, missingFiles: missingFiles, othersOpen: othersOpen, err: statusErr}
+				return browserStatusMsg{epoch: epoch, parentPath: path, haveFiles: haveFiles, depotDirs: depotDirs, missingFiles: missingFiles, othersOpen: othersOpen, err: statusErr}
 			},
 		)
 	}
@@ -2857,55 +3084,83 @@ func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 		var dirsErr, filesErr error
 		var wg sync.WaitGroup
 		wg.Add(3)
-		go func() { defer wg.Done(); othersOpen, _ = a.client.OpenedByOthers(wildcard) }()
-		go func() { defer wg.Done(); dirs, dirsErr = a.client.BrowserDirs(wildcard) }()
-		go func() { defer wg.Done(); files, filesErr = a.client.BrowserDepotFiles(wildcard) }()
+		go func() { defer wg.Done(); othersOpen, _ = client.OpenedByOthers(wildcard) }()
+		go func() { defer wg.Done(); dirs, dirsErr = client.BrowserDirs(wildcard) }()
+		go func() { defer wg.Done(); files, filesErr = client.BrowserDepotFiles(wildcard) }()
 		wg.Wait()
 		if dirsErr != nil {
-			return browserLoadedMsg{parentPath: path, err: dirsErr}
+			return browserLoadedMsg{epoch: epoch, parentPath: path, err: dirsErr}
 		}
-		return browserLoadedMsg{parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen, err: filesErr}
+		return browserLoadedMsg{epoch: epoch, parentPath: path, dirs: dirs, files: files, othersOpen: othersOpen, err: filesErr}
 	}
 }
 
-
 func (a *App) cmdResolveList(path string) tea.Cmd {
+	a.resolvePath = path
+	a.resolveRequest++
+	request := a.resolveRequest
+	client := *a.client
 	return func() tea.Msg {
-		conflicts, err := a.client.ResolveList(path)
-		return conflictsDoneMsg{conflicts: conflicts, err: err}
+		conflicts, err := client.ResolveList(path)
+		return conflictsDoneMsg{request: request, conflicts: conflicts, err: err}
+	}
+}
+
+func (a *App) cmdAutoResolve(files, flags []string) tea.Cmd {
+	if a.opRunning || len(files) == 0 {
+		return nil
+	}
+	a.opRunning = true
+	a.opName = "Resolving"
+	a.opID++
+	id := a.opID
+	client := *a.client
+	return func() tea.Msg {
+		for _, file := range files {
+			if file == "" {
+				return resolveDoneMsg{id: id, err: fmt.Errorf("resolve requires a selected file")}
+			}
+			if err := client.AutoResolve(file, flags); err != nil {
+				return resolveDoneMsg{id: id, err: err}
+			}
+		}
+		return resolveDoneMsg{id: id}
 	}
 }
 
 type revertCheckMsg struct {
 	clientFile string
 	hasChanges bool
+	clID       string
 }
 
-func (a *App) cmdRevertCheck(clientFile string) tea.Cmd {
+func (a *App) cmdRevertCheck(clientFile, clID string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		hasChanges, err := a.client.HasChanges(clientFile)
+		hasChanges, err := client.HasChanges(clientFile)
 		if err != nil {
 			// if we can't determine, assume changed and show modal
 			hasChanges = true
 		}
-		return revertCheckMsg{clientFile: clientFile, hasChanges: hasChanges}
+		return revertCheckMsg{clientFile: clientFile, hasChanges: hasChanges, clID: clID}
 	}
 }
 
 // cmdRevertUnchangedFiles runs p4 revert -a on the client files of the given
 // opened files, letting p4 decide which are actually unchanged.
 func (a *App) cmdRevertUnchangedFiles(files []p4.OpenedFile) tea.Cmd {
+	client := *a.client
 	paths := make([]string, len(files))
 	for i, f := range files {
 		paths[i] = f.ClientFile
 	}
 	sourceCLs := a.sourceCLsForClientFiles(paths)
 	return func() tea.Msg {
-		if err := a.client.RevertUnchangedPaths(paths); err != nil {
+		if err := client.RevertUnchangedPaths(paths); err != nil {
 			return opDoneMsg{"revert unchanged failed: " + err.Error(), "p4 revert -a", "error: " + err.Error()}
 		}
 		for _, cl := range sourceCLs {
-			_ = a.client.DeleteChange(cl)
+			_ = client.DeleteChange(cl)
 		}
 		return revertDoneMsg{files: paths}
 	}
@@ -2913,8 +3168,9 @@ func (a *App) cmdRevertUnchangedFiles(files []p4.OpenedFile) tea.Cmd {
 
 // cmdRevertUnchangedPath runs p4 revert -a on a local path (supports wildcards).
 func (a *App) cmdRevertUnchangedPath(localPath string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		if err := a.client.RevertUnchangedPaths([]string{localPath}); err != nil {
+		if err := client.RevertUnchangedPaths([]string{localPath}); err != nil {
 			return opDoneMsg{"revert unchanged failed: " + err.Error(), "p4 revert -a", "error: " + err.Error()}
 		}
 		return revertDoneMsg{}
@@ -2922,35 +3178,50 @@ func (a *App) cmdRevertUnchangedPath(localPath string) tea.Cmd {
 }
 
 func (a *App) cmdRevertUnchangedCL(clID string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		a.client.RevertUnchanged(clID)
+		if err := client.RevertUnchanged(clID); err != nil {
+			return opDoneMsg{"revert unchanged failed: " + err.Error(), "p4 revert -a -c " + clID, "error: " + err.Error()}
+		}
 		return revertDoneMsg{}
 	}
 }
 
-func (a *App) cmdRevert(clientFiles []string) tea.Cmd {
+func (a *App) cmdRevert(clientFiles []string, clID string) tea.Cmd {
+	client := *a.client
 	sourceCLs := a.sourceCLsForClientFiles(clientFiles)
 	return func() tea.Msg {
-		_, err := a.client.RevertFiles(clientFiles)
+		var err error
+		if clID != "" {
+			_, err = client.RevertCL(clID, clientFiles)
+		} else {
+			_, err = client.RevertFiles(clientFiles)
+		}
 		if err != nil {
 			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
 		}
 		for _, cl := range sourceCLs {
-			_ = a.client.DeleteChange(cl)
+			_ = client.DeleteChange(cl)
 		}
 		return revertDoneMsg{files: clientFiles}
 	}
 }
 
-func (a *App) cmdRevertAndDeleteLocal(clientFiles, localFiles []string) tea.Cmd {
+func (a *App) cmdRevertAndDeleteLocal(clientFiles, localFiles []string, clID string) tea.Cmd {
+	client := *a.client
 	sourceCLs := a.sourceCLsForClientFiles(clientFiles)
 	return func() tea.Msg {
-		_, err := a.client.RevertFiles(clientFiles)
+		var err error
+		if clID != "" {
+			_, err = client.RevertCL(clID, clientFiles)
+		} else {
+			_, err = client.RevertFiles(clientFiles)
+		}
 		if err != nil {
 			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
 		}
 		for _, cl := range sourceCLs {
-			_ = a.client.DeleteChange(cl)
+			_ = client.DeleteChange(cl)
 		}
 		for _, local := range localFiles {
 			_ = os.Remove(local)
@@ -3015,8 +3286,9 @@ func opErrLine(err error) string {
 }
 
 func (a *App) cmdOpenFile(depotPath string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		local, err := a.client.WhereLocal(depotPath)
+		local, err := client.WhereLocal(depotPath)
 		if err != nil {
 			return openFileDoneMsg{err: fmt.Errorf("p4 where: %w", err)}
 		}
@@ -3028,8 +3300,7 @@ func (a *App) cmdOpenFile(depotPath string) tea.Cmd {
 }
 
 // browserLocalPath returns the local filesystem path for the currently selected
-// browser entry, appending /... for directories. Falls back to the workspace
-// root with /... if nothing is selected. Returns "" if no local path is available.
+// browser entry, appending /... for directories. Mapping failures have no target.
 func (a *App) browserLocalPath() string {
 	if sel := a.browserPane.SelectedEntry(); sel != nil {
 		if sel.LocalPath != "" {
@@ -3038,28 +3309,19 @@ func (a *App) browserLocalPath() string {
 			}
 			return sel.LocalPath
 		}
-		// Directory nodes don't carry a LocalPath; derive it from the depot path
-		// using the stream-to-root mapping (workspace mode only).
-		// Note: SelectedEntry appends "/..." to directory depot paths, so strip it first.
-		if sel.IsDir && a.client.Stream != "" && a.client.Root != "" {
-			nodePath := strings.TrimSuffix(sel.DepotPath, "/...")
-			if strings.HasPrefix(nodePath, a.client.Stream) {
-				rel := strings.TrimPrefix(nodePath, a.client.Stream)
-				return a.client.Root + rel + string(filepath.Separator) + "..."
-			}
+		if local, err := a.client.WhereLocal(sel.DepotPath); err == nil {
+			return local
 		}
-	}
-	if a.client.Root != "" {
-		return a.client.Root + string(filepath.Separator) + "..."
 	}
 	return ""
 }
 
 func (a *App) cmdReconcile(path string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		_, err := a.client.Reconcile(path)
+		_, err := client.Reconcile(path)
 		if err == nil {
-			count, roErr := a.client.RestoreReadOnly(path)
+			count, roErr := client.RestoreReadOnly(path)
 			a.cmdLog.Add("p4 restore-readonly", fmt.Sprintf("path=%s count=%d err=%v", path, count, roErr))
 		}
 		return reconcileDoneMsg{path: path, err: err}
@@ -3067,8 +3329,9 @@ func (a *App) cmdReconcile(path string) tea.Cmd {
 }
 
 func (a *App) cmdEdit(localPath string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		_, err := a.client.Edit(localPath)
+		_, err := client.Edit(localPath)
 		return reconcileDoneMsg{path: localPath, err: err}
 	}
 }
@@ -3079,83 +3342,72 @@ type browserDeleteDoneMsg struct {
 }
 
 func (a *App) cmdBrowserDelete(path string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		err := a.client.DeletePath(path)
+		err := client.DeletePath(path)
 		return browserDeleteDoneMsg{path: path, err: err}
 	}
 }
 
-func (a *App) cmdMergeStream(target string) tea.Cmd {
-	a.status = "Merging from " + target + "..."
+func (a *App) cmdPromoteStream(source string) tea.Cmd {
+	a.status = "Promoting " + source + "..."
+	client := *a.client
 	return func() tea.Msg {
-		out, err := a.client.MergeStream(target)
+		out, err := client.MergeStream(source)
+		_ = out
+		return integrateDoneMsg{op: "copy", src: source, err: err}
+	}
+}
+
+func (a *App) cmdPullStream(target string) tea.Cmd {
+	a.status = "Pulling into " + target + "..."
+	client := *a.client
+	return func() tea.Msg {
+		out, err := client.CopyStream(target)
 		_ = out
 		return integrateDoneMsg{op: "merge", src: target, err: err}
 	}
 }
 
-func (a *App) cmdCopyStream(target string) tea.Cmd {
-	a.status = "Copying to " + target + "..."
-	return func() tea.Msg {
-		out, err := a.client.CopyStream(target)
-		_ = out
-		return integrateDoneMsg{op: "copy", src: target, err: err}
-	}
-}
-
 func (a *App) cmdIntegrateClassic(source, target string) tea.Cmd {
+	client := *a.client
 	a.status = "Integrating " + source + " → " + target + "..."
 	return func() tea.Msg {
-		out, err := a.client.IntegrateClassic(source, target)
+		out, err := client.IntegrateClassic(source, target)
 		_ = out
 		return integrateDoneMsg{op: "integrate", src: source + " → " + target, err: err}
 	}
 }
 
 func (a *App) cmdSyncPath(path string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		_, err := a.client.SyncPath(path)
+		_, err := client.SyncPath(path)
 		return forceSyncDoneMsg{path: path, err: err}
 	}
 }
 
 func (a *App) cmdForceSync(path string) tea.Cmd {
+	client := *a.client
 	return func() tea.Msg {
-		_, err := a.client.ForceSyncPath(path)
+		_, err := client.ForceSyncPath(path)
 		return forceSyncDoneMsg{path: path, err: err}
 	}
 }
 
 func (a *App) cmdSyncToCL(stream, cl string) tea.Cmd {
+	client := *a.client
 	a.status = fmt.Sprintf("Syncing to CL %s...", cl)
 	return func() tea.Msg {
-		err := a.client.SyncToCL(stream, cl)
+		err := client.SyncToCL(stream, cl)
 		return syncToCLDoneMsg{cl: cl, err: err}
 	}
 }
 
-// shelveAndRevert shelves all files in a changelist and reverts them.
-func (a *App) shelveAndRevert(cl p4.Changelist) error {
-	if len(cl.Files) == 0 {
-		return nil
-	}
-	if _, err := a.client.Shelve(cl.ID); err != nil {
-		return fmt.Errorf("shelve CL %s: %w", cl.ID, err)
-	}
-	clientFiles := make([]string, len(cl.Files))
-	for i, f := range cl.Files {
-		clientFiles[i] = f.ClientFile
-	}
-	if _, err := a.client.RevertFiles(clientFiles); err != nil {
-		return fmt.Errorf("revert CL %s: %w", cl.ID, err)
-	}
-	return nil
-}
-
-
 // cmdSwitchToStream moves any numbered-CL files to the default CL (p4 switch requires it),
 // then switches. p4 switch handles default-CL files natively.
 func (a *App) cmdSwitchToStream(stream string) tea.Cmd {
+	client := *a.client
 	a.status = "Switching to " + stream + "..."
 	var numberedFiles []p4.OpenedFile
 	for _, cl := range a.fileList.Changelists() {
@@ -3165,19 +3417,18 @@ func (a *App) cmdSwitchToStream(stream string) tea.Cmd {
 	}
 	return func() tea.Msg {
 		for _, f := range numberedFiles {
-			if _, err := a.client.Reopen("default", f.ClientFile); err != nil {
+			if _, err := client.Reopen("default", f.ClientFile); err != nil {
 				return streamSwitchedMsg{stream: stream, err: err}
 			}
 		}
-		err := a.client.SwitchToStream(stream)
+		err := client.SwitchToStream(stream)
 		return streamSwitchedMsg{stream: stream, err: err}
 	}
 }
 
-
-
 // cmdShelveForCheckout consolidates all open files into one shelf, reverts them, then syncs.
 func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
+	client := *a.client
 	a.checkout = nil
 	a.status = fmt.Sprintf("Shelving open files before sync to CL %s...", co.cl)
 	stream := co.stream
@@ -3186,37 +3437,43 @@ func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
 	for _, c := range a.fileList.Changelists() {
 		allFiles = append(allFiles, c.Files...)
 	}
-	currentCL := a.client.CurrentCL()
+	currentCL := client.CurrentCL()
 	desc := "CL " + currentCL + " → CL " + cl
 	if currentCL == "" {
 		desc = "→ CL " + cl
 	}
 	return func() tea.Msg {
-		clID, err := a.client.CreateChange(desc)
+		clID, err := client.CreateChange(desc)
 		if err != nil {
 			return syncToCLDoneMsg{cl: cl, err: err}
 		}
 		for _, f := range allFiles {
-			if _, err := a.client.Reopen(clID, f.ClientFile); err != nil {
+			if _, err := client.Reopen(clID, f.ClientFile); err != nil {
 				return syncToCLDoneMsg{cl: cl, err: err}
 			}
 		}
-		if _, err := a.client.Shelve(clID); err != nil {
+		if _, err := client.Shelve(clID); err != nil {
 			return syncToCLDoneMsg{cl: cl, err: err}
 		}
 		clientFiles := make([]string, len(allFiles))
 		for i, f := range allFiles {
 			clientFiles[i] = f.ClientFile
 		}
-		if _, err := a.client.RevertFiles(clientFiles); err != nil {
+		if _, err := client.RevertFiles(clientFiles); err != nil {
 			return syncToCLDoneMsg{cl: cl, err: err}
 		}
-		return syncToCLDoneMsg{cl: cl, err: a.client.SyncToCL(stream, cl)}
+		return syncToCLDoneMsg{cl: cl, err: client.SyncToCL(stream, cl)}
 	}
 }
 
 func (a *App) cmdSyncDryRun() tea.Cmd {
+	if a.opRunning {
+		return nil
+	}
 	a.opRunning = true
+	a.opID++
+	id := a.opID
+	client := *a.client
 	a.opName = "Syncing"
 	a.opTotal = 0
 	a.opDone = 0
@@ -3226,8 +3483,8 @@ func (a *App) cmdSyncDryRun() tea.Cmd {
 		a.syncPath = "//..."
 	}
 	return func() tea.Msg {
-		count, err := a.client.SyncDryRun()
-		return syncDryDoneMsg{total: count, err: err}
+		count, err := client.SyncDryRun()
+		return syncDryDoneMsg{id: id, total: count, err: err}
 	}
 }
 
@@ -3242,35 +3499,28 @@ func (a *App) cmdOpStart(fn func(ctx context.Context, ch chan<- string)) tea.Cmd
 }
 
 func (a *App) cmdReadOpLine() tea.Cmd {
+	ch, id := a.opCh, a.opID
+	if ch == nil {
+		return nil
+	}
 	return func() tea.Msg {
-		line, ok := <-a.opCh
+		line, ok := <-ch
 		if !ok {
-			return opEndMsg{}
+			return opEndMsg{id: id}
 		}
 		if len(line) > 0 && line[0] == '\x00' {
 			errStr := line[1:]
 			if errStr == context.Canceled.Error() {
-				return opEndMsg{err: context.Canceled}
+				return opEndMsg{id: id, err: context.Canceled}
 			}
 			if errStr != "" {
-				return opEndMsg{err: fmt.Errorf("%s", errStr)}
+				return opEndMsg{id: id, err: fmt.Errorf("%s", errStr)}
 			}
-			return opEndMsg{}
+			return opEndMsg{id: id}
 		}
-		return opLineMsg{line: line}
+		return opLineMsg{id: id, line: line}
 	}
 }
-
-func (a *App) cmdShelve(clID string) tea.Cmd {
-	return func() tea.Msg {
-		_, err := a.client.Shelve(clID)
-		if err != nil {
-			return opDoneMsg{"shelve failed: " + err.Error(), "p4 shelve -c " + clID, "error: " + err.Error()}
-		}
-		return opDoneMsg{fmt.Sprintf("CL %s shelved", clID), "p4 shelve -c " + clID, "done"}
-	}
-}
-
 
 // filesToMove returns files to act on for the move-CL operation.
 func (a *App) filesToMove() []p4.OpenedFile {
@@ -3287,6 +3537,7 @@ func (a *App) filesToMove() []p4.OpenedFile {
 }
 
 func (a *App) execMoveToCL() tea.Cmd {
+	client := *a.client
 	m := a.moveModal
 	a.moveModal = nil
 	name := strings.TrimSpace(m.input.Value())
@@ -3302,12 +3553,12 @@ func (a *App) execMoveToCL() tea.Cmd {
 			if isNumeric(name) {
 				clID = name
 			} else {
-				found, err := a.client.FindCLByDescription(name)
+				found, err := client.FindCLByDescription(name)
 				if err != nil {
 					return moveDoneMsg{err: err}
 				}
 				if found == "" {
-					found, err = a.client.CreateChange(name)
+					found, err = client.CreateChange(name)
 					if err != nil {
 						return moveDoneMsg{err: err}
 					}
@@ -3315,14 +3566,14 @@ func (a *App) execMoveToCL() tea.Cmd {
 				clID = found
 			}
 		}
-		if _, err := a.client.ReopenFiles(clID, clientFiles); err != nil {
+		if _, err := client.ReopenFiles(clID, clientFiles); err != nil {
 			if strings.Contains(err.Error(), "unknown") && isNumeric(clID) {
 				return moveDoneMsg{err: fmt.Errorf("CL %s does not exist — a number-only input is treated as a CL ID, not a name", clID), userErr: true}
 			}
 			return moveDoneMsg{err: err}
 		}
 		for _, cl := range sourceCLs {
-			_ = a.client.DeleteChange(cl)
+			_ = client.DeleteChange(cl)
 		}
 		return moveDoneMsg{count: len(files), clID: clID}
 	}
@@ -3351,30 +3602,55 @@ func (a *App) renderMoveModal() string {
 }
 
 func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {
+	if a.opRunning {
+		return nil
+	}
 	a.opRunning = true
+	a.opID++
+	client := *a.client
 	a.opName = "Submitting"
 	a.opTotal = 0
 	a.opDone = 0
 	return a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
-		a.client.RevertUnchanged(clID)
-		err := a.client.SubmitStreaming(ctx, clID, description, ch)
+		if err := client.RevertUnchanged(clID); err != nil {
+			ch <- opErrLine(err)
+			close(ch)
+			return
+		}
+		err := client.Submit(ctx, clID, description, ch)
 		ch <- opErrLine(err)
 		close(ch)
 	})
 }
 
 type submitReadyMsg struct {
+	id          uint64
 	files       []p4.OpenedFile
 	description string
+	err         error
 }
 
 func (a *App) cmdSubmitMarkedFilter(files []p4.OpenedFile, description string) tea.Cmd {
+	if a.opRunning {
+		return nil
+	}
+	a.opRunning = true
+	a.opName = "Preparing submit"
+	a.opTotal = len(files)
+	a.opDone = 0
+	a.opID++
+	id := a.opID
+	client := *a.client
 	return func() tea.Msg {
 		var toSubmit []p4.OpenedFile
 		var toRevert []string
 		for _, f := range files {
 			if f.Action == p4.ActionEdit {
-				if changed, err := a.client.HasChanges(f.ClientFile); err != nil || !changed {
+				changed, err := client.HasChanges(f.ClientFile)
+				if err != nil {
+					return submitReadyMsg{id: id, err: err}
+				}
+				if !changed {
 					toRevert = append(toRevert, f.ClientFile)
 					continue
 				}
@@ -3382,19 +3658,22 @@ func (a *App) cmdSubmitMarkedFilter(files []p4.OpenedFile, description string) t
 			toSubmit = append(toSubmit, f)
 		}
 		if len(toRevert) > 0 {
-			a.client.RevertFiles(toRevert)
+			if err := client.RevertUnchangedPaths(toRevert); err != nil {
+				return submitReadyMsg{id: id, err: err}
+			}
 		}
-		return submitReadyMsg{files: toSubmit, description: description}
+		return submitReadyMsg{id: id, files: toSubmit, description: description}
 	}
 }
 
 func (a *App) cmdSubmitMarkedStart(files []p4.OpenedFile, description string) tea.Cmd {
+	client := *a.client
 	a.opRunning = true
 	a.opName = "Submitting"
 	a.opTotal = len(files)
 	a.opDone = 0
 	return a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
-		err := a.client.SubmitMarkedStreaming(ctx, files, description, ch)
+		err := client.SubmitMarked(ctx, files, description, ch)
 		ch <- opErrLine(err)
 		close(ch)
 	})

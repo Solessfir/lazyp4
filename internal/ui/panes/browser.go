@@ -37,7 +37,8 @@ type BrowserNeedsSearchMsg struct {
 
 type browserNode struct {
 	name           string
-	path           string // depot path
+	path           string // tree identity in the current browser namespace
+	depotPath      string
 	localPath      string // absolute local path (workspace mode only)
 	isDir          bool
 	tracked        bool // synced via p4 have (workspace mode only; always true in depot mode)
@@ -46,6 +47,15 @@ type browserNode struct {
 	children       []*browserNode
 	openedByMe     bool
 	openedByOthers bool
+	status         *workspaceStatus
+}
+
+type workspaceStatus struct {
+	haveFiles    []string
+	depotDirs    []string
+	missingFiles []p4.WorkspaceEntry
+	yoursOpen    map[string]bool
+	othersOpen   map[string]bool
 }
 
 type browserRow struct {
@@ -58,30 +68,42 @@ var (
 	styleBrowserWsFile    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))            // white (workspace)
 	styleBrowserDepotFile = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))            // blue (depot)
 	styleBrowserLoading   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleOpenMe           = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))  // green — opened by you
-	styleOpenOther        = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))  // blue — opened by others
-	styleOpenBoth         = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))  // yellow — opened by both
-	styleBrowserUntracked = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))  // gray — local only, not in depot
+	styleOpenMe           = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green — opened by you
+	styleOpenOther        = lipgloss.NewStyle().Foreground(lipgloss.Color("4")) // blue — opened by others
+	styleOpenBoth         = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow — opened by both
+	styleBrowserUntracked = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray — local only, not in depot
 )
 
 // BrowserPane is a lazy-loading tree browser for workspace or depot files.
 type BrowserPane struct {
-	mode  BrowserMode
-	root  *browserNode
-	rows  []browserRow
-	cursor       int
-	focused      bool
-	width        int
-	height       int
-	scrollOff    int
-	filterMode   bool
-	filter       string
-	filterCursor int
-	searchIndex  []*browserNode // flat list of all files loaded for search
+	mode          BrowserMode
+	root          *browserNode
+	rows          []browserRow
+	cursor        int
+	focused       bool
+	width         int
+	height        int
+	scrollOff     int
+	filterMode    bool
+	filter        string
+	filterCursor  int
+	searchIndex   []*browserNode // flat list of all files loaded for search
+	depotRoot     string
+	workspaceRoot string
 }
 
 func NewBrowserPane() *BrowserPane {
 	return &BrowserPane{}
+}
+
+func (p *BrowserPane) SetRoots(depotRoot, workspaceRoot string) {
+	p.depotRoot = depotRoot
+	p.workspaceRoot = workspaceRoot
+	if p.mode == BrowserModeWorkspace {
+		p.SetRoot(workspaceRoot)
+	} else {
+		p.SetRoot(depotRoot)
+	}
 }
 
 func (p *BrowserPane) SetRoot(path string) {
@@ -120,15 +142,14 @@ func (p *BrowserPane) ToggleMode() {
 		p.mode = BrowserModeWorkspace
 	}
 	// Reset tree — app will call cmdBrowserLoad + navigate to selected file.
-	if p.root != nil {
-		rootPath := p.root.path
-		p.root = &browserNode{name: p.root.name, path: rootPath, isDir: true}
+	path := p.depotRoot
+	if p.mode == BrowserModeWorkspace {
+		path = p.workspaceRoot
 	}
-
-	p.cursor = 0
-	p.scrollOff = 0
-	p.searchIndex = nil
-	p.rebuild()
+	if path == "" {
+		path = p.RootPath()
+	}
+	p.SetRoot(path)
 }
 
 func (p *BrowserPane) SetFocused(f bool) { p.focused = f }
@@ -227,6 +248,10 @@ func (p *BrowserPane) ClearFilter() string {
 func (p *BrowserPane) ScrollOffset() int { return p.scrollOff }
 
 func (p *BrowserPane) SetCursor(idx int) {
+	if p.filter != "" {
+		p.filterCursor = max(0, min(idx, len(p.filteredRows())-1))
+		return
+	}
 	if idx < 0 {
 		idx = 0
 	}
@@ -238,7 +263,7 @@ func (p *BrowserPane) SetCursor(idx int) {
 	}
 }
 
-func (p *BrowserPane) JumpTop() { p.SetCursor(0) }
+func (p *BrowserPane) JumpTop()    { p.SetCursor(0) }
 func (p *BrowserPane) JumpBottom() { p.SetCursor(len(p.rows) - 1) }
 
 func (p *BrowserPane) CollapseAll() {
@@ -330,7 +355,7 @@ func (p *BrowserPane) LoadSearchIndex(files []string) {
 		if idx := strings.LastIndex(f, "/"); idx >= 0 && idx < len(f)-1 {
 			name = f[idx+1:]
 		}
-		p.searchIndex = append(p.searchIndex, &browserNode{name: name, path: f})
+		p.searchIndex = append(p.searchIndex, &browserNode{name: name, path: f, tracked: true})
 	}
 }
 
@@ -375,17 +400,18 @@ func (p *BrowserPane) SelectedPath() string {
 	}
 	n := rows[cur].node
 	if n.isDir {
-		return n.path + "/..."
+		return strings.TrimSuffix(n.path, "/") + "/..."
 	}
 	return n.path
 }
 
 // BrowserSelection holds information about the currently selected browser node.
 type BrowserSelection struct {
-	DepotPath string
-	LocalPath string
-	IsDir     bool
-	Tracked   bool // always true in depot mode
+	DepotPath  string
+	ClientPath string
+	LocalPath  string
+	IsDir      bool
+	Tracked    bool // always true in depot mode
 }
 
 // SelectedEntry returns info about the currently selected node, or nil if nothing selected.
@@ -400,14 +426,18 @@ func (p *BrowserPane) SelectedEntry() *BrowserSelection {
 	}
 	n := rows[cur].node
 	depotPath := n.path
+	if n.depotPath != "" {
+		depotPath = n.depotPath
+	}
 	if n.isDir {
-		depotPath = n.path + "/..."
+		depotPath = strings.TrimSuffix(n.path, "/") + "/..."
 	}
 	return &BrowserSelection{
-		DepotPath: depotPath,
-		LocalPath: n.localPath,
-		IsDir:     n.isDir,
-		Tracked:   n.tracked,
+		DepotPath:  depotPath,
+		ClientPath: n.path,
+		LocalPath:  n.localPath,
+		IsDir:      n.isDir,
+		Tracked:    n.tracked,
 	}
 }
 
@@ -441,8 +471,15 @@ func (p *BrowserPane) refreshYoursNode(node *browserNode, yours map[string]bool)
 	if node == nil {
 		return
 	}
+	if node.status != nil {
+		node.status.yoursOpen = yours
+	}
 	if !node.isDir {
-		node.openedByMe = yours[node.path]
+		path := node.depotPath
+		if path == "" {
+			path = node.path
+		}
+		node.openedByMe = yours[path]
 	}
 	for _, c := range node.children {
 		p.refreshYoursNode(c, yours)
@@ -469,13 +506,15 @@ func (p *BrowserPane) LoadChildren(parentPath string, dirs []string, files []str
 	}
 	if wsEntries != nil {
 		for _, e := range wsEntries {
-			name := e.DepotPath
-			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
-				name = e.DepotPath[idx+1:]
+			path := workspaceEntryPath(e)
+			name := path
+			if idx := strings.LastIndex(path, "/"); idx >= 0 && idx < len(path)-1 {
+				name = path[idx+1:]
 			}
 			node.children = append(node.children, &browserNode{
 				name:           name,
-				path:           e.DepotPath,
+				path:           path,
+				depotPath:      e.DepotPath,
 				localPath:      e.LocalPath,
 				isDir:          false,
 				tracked:        e.Tracked,
@@ -526,13 +565,15 @@ func (p *BrowserPane) LoadChildrenFast(parentPath string, dirs []string, files [
 		node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
 	}
 	for _, e := range files {
-		name := e.DepotPath
-		if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
-			name = e.DepotPath[idx+1:]
+		path := workspaceEntryPath(e)
+		name := path
+		if idx := strings.LastIndex(path, "/"); idx >= 0 && idx < len(path)-1 {
+			name = path[idx+1:]
 		}
 		node.children = append(node.children, &browserNode{
 			name:      name,
-			path:      e.DepotPath,
+			path:      path,
+			depotPath: e.DepotPath,
 			localPath: e.LocalPath,
 			isDir:     false,
 			tracked:   false,
@@ -540,6 +581,9 @@ func (p *BrowserPane) LoadChildrenFast(parentPath string, dirs []string, files [
 	}
 	node.loaded = true
 	node.expanded = true
+	if status := node.status; status != nil {
+		p.ApplyStatus(parentPath, status.haveFiles, status.depotDirs, status.missingFiles, status.yoursOpen, status.othersOpen)
+	}
 	p.rebuild()
 	if len(node.children) == 1 && node.children[0].isDir {
 		return node.children[0].path
@@ -556,6 +600,7 @@ func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []stri
 	if node == nil {
 		return ""
 	}
+	node.status = &workspaceStatus{haveFiles, depotDirs, missingFiles, yoursOpen, othersOpen}
 	haveSet := map[string]bool{}
 	for _, f := range haveFiles {
 		haveSet[f] = true
@@ -571,13 +616,15 @@ func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []stri
 			node.children = append(node.children, &browserNode{name: name, path: d, isDir: true})
 		}
 		for _, e := range missingFiles {
-			name := e.DepotPath
-			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
-				name = e.DepotPath[idx+1:]
+			path := workspaceEntryPath(e)
+			name := path
+			if idx := strings.LastIndex(path, "/"); idx >= 0 && idx < len(path)-1 {
+				name = path[idx+1:]
 			}
 			node.children = append(node.children, &browserNode{
 				name:           name,
-				path:           e.DepotPath,
+				path:           path,
+				depotPath:      e.DepotPath,
 				localPath:      e.LocalPath,
 				isDir:          false,
 				tracked:        true,
@@ -598,9 +645,13 @@ func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []stri
 	for _, c := range node.children {
 		childPaths[c.path] = true
 		if !c.isDir {
-			c.tracked = haveSet[c.path]
-			c.openedByMe = yoursOpen[c.path]
-			c.openedByOthers = othersOpen[c.path]
+			path := c.depotPath
+			if path == "" {
+				path = c.path
+			}
+			c.tracked = haveSet[path]
+			c.openedByMe = yoursOpen[path]
+			c.openedByOthers = othersOpen[path]
 		}
 	}
 	// Add depot-only dirs not in local filesystem.
@@ -615,14 +666,16 @@ func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []stri
 	}
 	// Add tracked files missing from local filesystem.
 	for _, e := range missingFiles {
-		if !childPaths[e.DepotPath] {
-			name := e.DepotPath
-			if idx := strings.LastIndex(e.DepotPath, "/"); idx >= 0 && idx < len(e.DepotPath)-1 {
-				name = e.DepotPath[idx+1:]
+		path := workspaceEntryPath(e)
+		if !childPaths[path] {
+			name := path
+			if idx := strings.LastIndex(path, "/"); idx >= 0 && idx < len(path)-1 {
+				name = path[idx+1:]
 			}
 			node.children = append(node.children, &browserNode{
 				name:           name,
-				path:           e.DepotPath,
+				path:           path,
+				depotPath:      e.DepotPath,
 				localPath:      e.LocalPath,
 				isDir:          false,
 				tracked:        true,
@@ -633,6 +686,13 @@ func (p *BrowserPane) ApplyStatus(parentPath string, haveFiles, depotDirs []stri
 	}
 	p.rebuild()
 	return ""
+}
+
+func workspaceEntryPath(entry p4.WorkspaceEntry) string {
+	if entry.ClientPath != "" {
+		return entry.ClientPath
+	}
+	return entry.DepotPath
 }
 
 func (p *BrowserPane) findNode(node *browserNode, path string) *browserNode {

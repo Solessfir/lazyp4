@@ -4,13 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -27,11 +29,12 @@ func IsConnectionError(err error) bool {
 
 // Client wraps p4 CLI invocations.
 type Client struct {
-	Port      string
-	User      string
-	Workspace string
-	Root      string   // local root of the current workspace; used as CWD for commands that require it
-	Stream    string   // current stream path e.g. //depot/main
+	Port          string
+	User          string
+	Workspace     string
+	Root          string // local root of the current workspace; used as CWD for commands that require it
+	Stream        string // current stream path e.g. //depot/main
+	StorePassword bool   // opt in to saving credentials in the OS keychain
 }
 
 // globalFlags returns the p4 global flags (-p, -u, -c).
@@ -52,6 +55,7 @@ func (c *Client) globalFlags() []string {
 // run executes a p4 command and returns stdout + stderr combined on error.
 func (c *Client) run(args ...string) (string, error) {
 	cmd := exec.Command("p4", append(c.globalFlags(), args...)...)
+	configureP4Command(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -64,58 +68,76 @@ func (c *Client) run(args ...string) (string, error) {
 
 // runZtag executes a p4 command with -ztag as a global flag.
 func (c *Client) runZtag(args ...string) (string, error) {
-	flags := append([]string{"-ztag"}, c.globalFlags()...)
+	flags := append([]string{"-ztag", "-Mj"}, c.globalFlags()...)
 	cmd := exec.Command("p4", append(flags, args...)...)
+	configureP4Command(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stdout.String()+stderr.String()))
 	}
-	return stdout.String(), nil
+	return validateStructuredOutput(stdout.String())
+}
+
+func validateStructuredOutput(output string) (string, error) {
+	decoder := json.NewDecoder(strings.NewReader(output))
+	for {
+		var record map[string]json.RawMessage
+		if err := decoder.Decode(&record); err != nil {
+			if err == io.EOF {
+				return output, nil
+			}
+			return "", fmt.Errorf("invalid structured p4 output: %w", err)
+		}
+		if record == nil {
+			return "", fmt.Errorf("invalid structured p4 output: expected an object")
+		}
+	}
 }
 
 // runWithStdin executes a p4 command with data piped to stdin.
 func (c *Client) runWithStdin(stdin string, args ...string) (string, error) {
 	cmd := exec.Command("p4", append(c.globalFlags(), args...)...)
+	configureP4Command(cmd)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stdout.String()+stderr.String()))
 	}
 	return stdout.String(), nil
 }
 
-// parseZtag parses -ztag output into a slice of field maps.
-// Records are separated by blank lines.
+func (c *Client) whereFiles(paths []string) (string, error) {
+	output, err := c.runWithStdin(strings.Join(paths, "\n")+"\n", "-ztag", "-Mj", "-x", "-", "where")
+	if err != nil {
+		return "", err
+	}
+	return validateStructuredOutput(output)
+}
+
+// parseZtag reads JSON records after runZtag has validated the complete output.
 func parseZtag(output string) []map[string]string {
 	var records []map[string]string
-	current := map[string]string{}
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			if len(current) > 0 {
-				records = append(records, current)
-				current = map[string]string{}
-			}
+	decoder := json.NewDecoder(strings.NewReader(output))
+	decoder.UseNumber()
+	for decoder.More() {
+		var fields map[string]interface{}
+		if err := decoder.Decode(&fields); err != nil {
+			break
+		}
+		if _, message := fields["data"]; message {
 			continue
 		}
-		if strings.HasPrefix(line, "... ") {
-			rest := line[4:]
-			idx := strings.Index(rest, " ")
-			if idx == -1 {
-				current[rest] = ""
-			} else {
-				current[rest[:idx]] = rest[idx+1:]
-			}
+		record := make(map[string]string, len(fields))
+		for key, value := range fields {
+			record[key] = fmt.Sprint(value)
 		}
-	}
-	if len(current) > 0 {
-		records = append(records, current)
+		records = append(records, record)
 	}
 	return records
 }
@@ -174,7 +196,8 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 // For Binary files, keeps the --- / +++ headers and replaces the
 // "(... files differ ...)" line with a size summary.
 func (c *Client) Diff(clientFile string) (string, error) {
-	out, err := c.run("diff", "-du", "-f", clientFile)
+	// Force permits offline edits; an explicit have revision avoids comparing against HEAD.
+	out, err := c.run("diff", "-du", "-f", clientFile+"#have")
 	// p4 diff exits non-zero when files differ; for binary files the marker is
 	// "(... files differ ...)" — treat this as success, not an error.
 	if strings.Contains(out, "files differ") {
@@ -270,20 +293,21 @@ func (c *Client) Shelve(clID string) (string, error) {
 	return c.run("shelve", "-c", clID)
 }
 
-
 // ShelveFiles shelves specific files from a changelist.
 func (c *Client) ShelveFiles(clID string, clientFiles []string) (string, error) {
+	number, err := strconv.Atoi(clID)
+	if err != nil || number <= 0 {
+		return "", fmt.Errorf("selected files require a numbered changelist to shelve")
+	}
+	if len(clientFiles) == 0 {
+		return "", fmt.Errorf("select files to shelve")
+	}
 	args := append([]string{"shelve", "-c", clID}, clientFiles...)
 	return c.run(args...)
 }
 
-// Submit submits the given changelist.
-func (c *Client) Submit(clID, description string) (string, error) {
-	return c.run("submit", "-c", clID)
-}
-
-// SubmitStreaming submits a changelist and streams output lines into lines.
-func (c *Client) SubmitStreaming(ctx context.Context, clID, description string, lines chan<- string) error {
+// Submit submits a changelist and streams output lines into lines.
+func (c *Client) Submit(ctx context.Context, clID, description string, lines chan<- string) error {
 	if clID == "" || clID == "default" {
 		args := c.globalFlags()
 		args = append(args, "submit")
@@ -301,8 +325,11 @@ func (c *Client) SubmitStreaming(ctx context.Context, clID, description string, 
 	return c.streamCommand(ctx, lines, args...)
 }
 
-// SubmitMarkedStreaming moves files into a new CL and submits it, streaming output.
-func (c *Client) SubmitMarkedStreaming(ctx context.Context, files []OpenedFile, description string, lines chan<- string) error {
+// SubmitMarked moves selected files into a new changelist and submits it.
+func (c *Client) SubmitMarked(ctx context.Context, files []OpenedFile, description string, lines chan<- string) error {
+	if len(files) == 0 {
+		return fmt.Errorf("select files to submit")
+	}
 	clID, err := c.CreateChange(description)
 	if err != nil {
 		return fmt.Errorf("create change: %w", err)
@@ -312,12 +339,13 @@ func (c *Client) SubmitMarkedStreaming(ctx context.Context, files []OpenedFile, 
 			return fmt.Errorf("reopen %s: %w", f.ClientFile, err)
 		}
 	}
-	return c.SubmitStreaming(ctx, clID, description, lines)
+	return c.Submit(ctx, clID, description, lines)
 }
 
 // streamCommand runs a p4 command and sends each stdout line to lines.
 func (c *Client) streamCommand(ctx context.Context, lines chan<- string, args ...string) error {
 	cmd := exec.CommandContext(ctx, "p4", args...)
+	configureP4Command(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -356,8 +384,9 @@ func (c *Client) RevertFiles(clientFiles []string) (string, error) {
 
 // RevertUnchanged reverts all open files in the given CL that are identical to the depot version.
 // Pass "default" for the default CL. Errors are silently ignored (no files to revert is normal).
-func (c *Client) RevertUnchanged(clID string) {
-	c.run("revert", "-a", "-c", clID)
+func (c *Client) RevertUnchanged(clID string) error {
+	_, err := c.run("revert", "-a", "-c", clID, "//...")
+	return err
 }
 
 // RevertUnchangedPaths reverts the given paths (client files or local paths with wildcards)
@@ -414,9 +443,13 @@ func (c *Client) ReopenFiles(clID string, clientFiles []string) (string, error) 
 	return c.run(args...)
 }
 
-// RevertCL reverts all files in the given changelist.
-func (c *Client) RevertCL(clID string) (string, error) {
-	return c.run("revert", "-c", clID, "//...")
+// RevertCL discards the confirmed files while leaving later additions to the changelist intact.
+func (c *Client) RevertCL(clID string, clientFiles []string) (string, error) {
+	if clID == "" || len(clientFiles) == 0 {
+		return "", fmt.Errorf("a changelist and selected files are required to revert")
+	}
+	args := append([]string{"revert", "-c", clID}, clientFiles...)
+	return c.run(args...)
 }
 
 // Reopen moves a file to a different changelist.
@@ -442,8 +475,9 @@ func (c *Client) UpdateChangeDescription(clID, description string) error {
 	var result []string
 	skip := false
 	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
 		if strings.HasPrefix(line, "Description:") {
-			result = append(result, "Description:\t"+description)
+			result = append(result, descriptionSpec(description))
 			skip = true
 			continue
 		}
@@ -459,7 +493,7 @@ func (c *Client) UpdateChangeDescription(clID, description string) error {
 }
 
 func (c *Client) CreateChange(description string) (string, error) {
-	spec := "Change:\tnew\nDescription:\t" + description + "\n"
+	spec := "Change:\tnew\n" + descriptionSpec(description) + "\n"
 	out, err := c.runWithStdin(spec, "change", "-i")
 	if err != nil {
 		return "", err
@@ -472,20 +506,9 @@ func (c *Client) CreateChange(description string) (string, error) {
 	return "", fmt.Errorf("unexpected change output: %s", out)
 }
 
-// SubmitMarked moves the given files into a new CL and submits it.
-// Files not in the list remain in their original changelists.
-func (c *Client) SubmitMarked(files []OpenedFile, description string) error {
-	clID, err := c.CreateChange(description)
-	if err != nil {
-		return fmt.Errorf("create change: %w", err)
-	}
-	for _, f := range files {
-		if _, err := c.Reopen(clID, f.ClientFile); err != nil {
-			return fmt.Errorf("reopen %s: %w", f.ClientFile, err)
-		}
-	}
-	_, err = c.Submit(clID, description)
-	return err
+func descriptionSpec(description string) string {
+	description = strings.ReplaceAll(description, "\r\n", "\n")
+	return "Description:\n\t" + strings.ReplaceAll(description, "\n", "\n\t")
 }
 
 // CurrentCL returns the highest CL currently synced in the workspace (have revision).
@@ -590,24 +613,19 @@ func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
 	records := parseZtag(out)
 	entries := make([]FilelogEntry, 0, len(records))
 	for _, r := range records {
-		if r["change0"] == "" {
-			continue // record has no visible revisions (e.g. limit exhausted)
+		for i := 0; r[fmt.Sprintf("change%d", i)] != ""; i++ {
+			suffix := strconv.Itoa(i)
+			rev, _ := strconv.Atoi(r["rev"+suffix])
+			date := r["time"+suffix]
+			if ts, err := strconv.ParseInt(date, 10, 64); err == nil {
+				date = time.Unix(ts, 0).Format("02 Jan 2006 15:04")
+			}
+			entries = append(entries, FilelogEntry{
+				DepotFile: r["depotFile"], Rev: rev, Change: r["change"+suffix],
+				Action: Action(r["action"+suffix]), Date: date, Author: r["user"+suffix],
+				Client: r["client"+suffix], Description: strings.TrimSpace(r["desc"+suffix]),
+			})
 		}
-		rev, _ := strconv.Atoi(r["rev0"])
-		date := r["time0"]
-		if ts, err := strconv.ParseInt(date, 10, 64); err == nil {
-			date = time.Unix(ts, 0).Format("02 Jan 2006 15:04")
-		}
-		entries = append(entries, FilelogEntry{
-			DepotFile:   r["depotFile"],
-			Rev:         rev,
-			Change:      r["change0"],
-			Action:      Action(r["action0"]),
-			Date:        date,
-			Author:      r["user0"],
-			Client:      r["client0"],
-			Description: strings.TrimSpace(r["desc0"]),
-		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		ci, _ := strconv.Atoi(entries[i].Change)
@@ -794,10 +812,18 @@ func (c *Client) shelvedFiles(clID string) ([]ShelvedFile, error) {
 // If files were unshelved but p4 also reports an error (e.g. needs resolve), the shelf is
 // preserved and the error is returned so the user can resolve before re-trying.
 func (c *Client) UnshelveAndDelete(clID string) error {
+	expected, err := c.shelvedFiles(clID)
+	if err != nil {
+		return fmt.Errorf("inspect shelf: %w", err)
+	}
+	if len(expected) == 0 {
+		return fmt.Errorf("shelf has no files to unshelve; shelf was preserved")
+	}
 	tryUnshelve := func(extraArgs ...string) (out string, runErr error) {
 		args := append(c.globalFlags(), "unshelve", "-s", clID)
 		args = append(args, extraArgs...)
 		cmd := exec.Command("p4", args...)
+		configureP4Command(cmd)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
@@ -821,7 +847,7 @@ func (c *Client) UnshelveAndDelete(clID string) error {
 	unshelved = strings.Contains(out, " - unshelved")
 	needsResolve := strings.Contains(out, "needs resolve")
 
-	if runErr != nil && !unshelved {
+	if runErr != nil {
 		return fmt.Errorf("unshelve: %s: %s", runErr, strings.TrimSpace(out))
 	}
 	if !unshelved {
@@ -830,6 +856,15 @@ func (c *Client) UnshelveAndDelete(clID string) error {
 	if needsResolve {
 		// Files are open but require resolve before the shelf can be deleted.
 		return fmt.Errorf("files unshelved with conflicts — shelf kept, delete manually after resolving")
+	}
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, " - unshelved") {
+			count++
+		}
+	}
+	if count != len(expected) {
+		return fmt.Errorf("unshelved %d of %d files; shelf was preserved", count, len(expected))
 	}
 	if _, err := c.run("shelve", "-d", "-c", clID); err != nil {
 		if strings.Contains(err.Error(), "needs resolve") || strings.Contains(err.Error(), "Shelve aborted") {
@@ -857,16 +892,53 @@ func (c *Client) ForceSyncPath(depotPath string) (string, error) {
 
 // WhereLocal converts a depot path to a local filesystem path using p4 where.
 func (c *Client) WhereLocal(depotPath string) (string, error) {
-	out, err := c.run("where", depotPath)
+	mapping, err := c.where(depotPath)
 	if err != nil {
 		return "", err
 	}
-	// Output: //depot/path //client/path /local/path
-	fields := strings.Fields(strings.TrimSpace(out))
-	if len(fields) < 3 {
-		return "", fmt.Errorf("unexpected where output: %s", out)
+	return mapping["path"], nil
+}
+
+// ResolveCommand lets the CLI prepare merge inputs and record the accepted resolution.
+func (c *Client) ResolveCommand(file string) (*exec.Cmd, error) {
+	if strings.TrimSpace(file) == "" {
+		return nil, fmt.Errorf("select a file to resolve")
 	}
-	return fields[2], nil
+	cmd := exec.Command("p4", append(c.globalFlags(), "resolve", file)...)
+	if c.Root != "" {
+		cmd.Dir = c.Root
+	}
+	return cmd, nil
+}
+
+// WhereClient returns the effective client-view path, including remappings.
+func (c *Client) WhereClient(path string) (string, error) {
+	mapping, err := c.where(path)
+	if err != nil {
+		return "", err
+	}
+	return mapping["clientFile"], nil
+}
+
+func (c *Client) where(path string) (map[string]string, error) {
+	out, err := c.runZtag("where", path)
+	if err != nil {
+		return nil, err
+	}
+	var mapping map[string]string
+	for _, record := range parseZtag(out) {
+		if _, excluded := record["unmap"]; excluded {
+			mapping = nil
+			continue
+		}
+		if record["path"] != "" {
+			mapping = record
+		}
+	}
+	if mapping == nil {
+		return nil, fmt.Errorf("path is not mapped in workspace %s: %s", c.Workspace, path)
+	}
+	return mapping, nil
 }
 
 // Reconcile runs p4 reconcile on the given local path to detect offline changes
@@ -1009,7 +1081,10 @@ func (c *Client) BrowserDirs(wildcard string) ([]string, error) {
 
 // BrowserHaveFiles lists files synced in the workspace at the given wildcard (non-recursive).
 func (c *Client) BrowserHaveFiles(wildcard string) ([]string, error) {
-	out, err := c.run("have", wildcard)
+	if strings.TrimSpace(wildcard) == "" {
+		return nil, fmt.Errorf("a workspace file pattern is required")
+	}
+	out, err := c.runZtag("have", wildcard)
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "no such file") || strings.Contains(msg, "not on client") {
@@ -1018,12 +1093,9 @@ func (c *Client) BrowserHaveFiles(wildcard string) ([]string, error) {
 		return nil, err
 	}
 	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line = strings.TrimSpace(line); line == "" {
-			continue
-		}
-		if idx := strings.Index(line, "#"); idx > 0 {
-			files = append(files, line[:idx])
+	for _, record := range parseZtag(out) {
+		if path := record["depotFile"]; path != "" {
+			files = append(files, path)
 		}
 	}
 	return files, nil
@@ -1052,74 +1124,168 @@ func (c *Client) BrowserDepotFiles(wildcard string) ([]string, error) {
 
 // WorkspaceEntry represents a file visible in the local workspace (tracked or untracked).
 type WorkspaceEntry struct {
-	DepotPath string // depot path (computed for untracked files)
-	LocalPath string // absolute local path
-	Tracked   bool   // true if synced via p4 have
+	ClientPath string // path in the local workspace tree
+	DepotPath  string // depot path (computed for untracked files)
+	LocalPath  string // absolute local path
+	Tracked    bool   // true if synced via p4 have
 }
 
-// BrowserWorkspaceFast returns directories and files visible in the local workspace
-// from a filesystem scan only — no p4 server calls. All files are returned with
-// Tracked=false; call BrowserWorkspaceStatus to overlay p4 data.
+// BrowserWorkspaceFast scans local entries and maps them through the client view.
+// Paths use client syntax so remapped and imported directories retain their local hierarchy.
 func (c *Client) BrowserWorkspaceFast(depotPath string) (dirs []string, files []WorkspaceEntry, err error) {
-	if c.Root == "" || c.Stream == "" {
-		return nil, nil, nil
+	localDir, clientDir, err := c.workspaceDirectory(depotPath)
+	if err != nil {
+		return nil, nil, err
 	}
-	rel := strings.TrimPrefix(depotPath, c.Stream)
-	localDir := c.Root + rel
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
 		return nil, nil, err
 	}
+	var paths []string
 	for _, e := range entries {
-		computedDepot := c.Stream + rel + "/" + e.Name()
 		if e.IsDir() {
-			dirs = append(dirs, computedDepot)
+			dirs = append(dirs, clientDir+"/"+escapeFileSpec(e.Name()))
 		} else {
-			files = append(files, WorkspaceEntry{
-				DepotPath: computedDepot,
-				LocalPath: localDir + "/" + e.Name(),
-				Tracked:   false,
-			})
+			paths = append(paths, clientDir+"/"+escapeFileSpec(e.Name()))
+		}
+	}
+	if len(paths) == 0 {
+		return dirs, nil, nil
+	}
+	out, err := c.whereFiles(paths)
+	if err != nil {
+		return nil, nil, err
+	}
+	mapped := map[string]WorkspaceEntry{}
+	for _, r := range parseZtag(out) {
+		if _, excluded := r["unmap"]; excluded {
+			delete(mapped, r["clientFile"])
+			continue
+		}
+		if r["clientFile"] != "" && r["path"] != "" {
+			mapped[r["clientFile"]] = WorkspaceEntry{ClientPath: r["clientFile"], DepotPath: r["depotFile"], LocalPath: r["path"]}
+		}
+	}
+	for _, path := range paths {
+		if entry, ok := mapped[path]; ok {
+			files = append(files, entry)
 		}
 	}
 	return dirs, files, nil
+}
+
+func escapeFileSpec(path string) string {
+	return strings.NewReplacer("%", "%25", "@", "%40", "#", "%23", "*", "%2A").Replace(path)
+}
+
+func (c *Client) workspaceDirectory(path string) (local, client string, err error) {
+	if c.Root == "" || c.Workspace == "" {
+		return "", "", fmt.Errorf("workspace root and client are required")
+	}
+	prefix := "//" + c.Workspace
+	if path == prefix || strings.HasPrefix(path, prefix+"/") {
+		rel := strings.TrimPrefix(strings.TrimPrefix(path, prefix), "/")
+		// Client syntax preserves the workspace layout, independently of depot mappings.
+		rel = strings.NewReplacer("%40", "@", "%23", "#", "%2A", "*", "%25", "%").Replace(rel)
+		local = filepath.Join(c.Root, filepath.FromSlash(rel))
+		within, relErr := filepath.Rel(c.Root, local)
+		if relErr != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+			return "", "", fmt.Errorf("client path escapes workspace root: %s", path)
+		}
+		return local, strings.TrimRight(path, "/"), nil
+	}
+	mapping, err := c.where(strings.TrimRight(path, "/") + "/...")
+	if err != nil {
+		return "", "", err
+	}
+	return strings.TrimSuffix(mapping["path"], "..."), strings.TrimRight(strings.TrimSuffix(mapping["clientFile"], "..."), "/"), nil
 }
 
 // BrowserWorkspaceStatus fetches p4-side data for a workspace directory:
 // tracked file paths, depot subdirectory paths, and any tracked files missing
 // from the local filesystem (e.g. deleted on disk).
 func (c *Client) BrowserWorkspaceStatus(depotPath string) (haveFiles, depotDirs []string, missingFiles []WorkspaceEntry, err error) {
-	if c.Root == "" || c.Stream == "" {
-		return nil, nil, nil, nil
+	_, clientDir, err := c.workspaceDirectory(depotPath)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	rel := strings.TrimPrefix(depotPath, c.Stream)
-	localDir := c.Root + rel
-	wildcard := depotPath + "/*"
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); haveFiles, err = c.BrowserHaveFiles(wildcard) }()
-	go func() { defer wg.Done(); depotDirs, _ = c.BrowserDirs(wildcard) }()
-	wg.Wait()
+	wildcard := clientDir + "/*"
+	files, err := c.workspaceHaveEntries(wildcard)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, file := range files {
+		haveFiles = append(haveFiles, file.DepotPath)
+		if _, statErr := os.Stat(file.LocalPath); os.IsNotExist(statErr) {
+			missingFiles = append(missingFiles, file)
+		} else if statErr != nil {
+			return nil, nil, nil, statErr
+		}
+	}
+	dirs, err := c.BrowserDirs(wildcard)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(dirs) > 0 {
+		var paths []string
+		for _, dir := range dirs {
+			paths = append(paths, dir+"/...")
+		}
+		out, err := c.whereFiles(paths)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, r := range parseZtag(out) {
+			if _, excluded := r["unmap"]; !excluded && r["clientFile"] != "" {
+				depotDirs = append(depotDirs, strings.TrimSuffix(r["clientFile"], "/..."))
+			}
+		}
+	}
+	return haveFiles, depotDirs, missingFiles, nil
+}
 
-	// Find tracked files missing from local filesystem.
-	entries, fsErr := os.ReadDir(localDir)
-	localNames := map[string]bool{}
-	if fsErr == nil {
-		for _, e := range entries {
-			localNames[e.Name()] = true
+// BrowserWorkspaceFiles returns synced files in client syntax for tree searches.
+func (c *Client) BrowserWorkspaceFiles(wildcard string) ([]string, error) {
+	entries, err := c.workspaceHaveEntries(wildcard)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, entry := range entries {
+		paths = append(paths, entry.ClientPath)
+	}
+	return paths, nil
+}
+
+func (c *Client) workspaceHaveEntries(wildcard string) ([]WorkspaceEntry, error) {
+	paths, err := c.BrowserHaveFiles(wildcard)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	mappings, err := c.whereFiles(paths)
+	if err != nil {
+		return nil, err
+	}
+	byDepot := map[string]WorkspaceEntry{}
+	for _, r := range parseZtag(mappings) {
+		if _, excluded := r["unmap"]; excluded {
+			delete(byDepot, r["depotFile"])
+			continue
+		}
+		if r["path"] != "" {
+			byDepot[r["depotFile"]] = WorkspaceEntry{ClientPath: r["clientFile"], DepotPath: r["depotFile"], LocalPath: r["path"], Tracked: true}
 		}
 	}
-	for _, f := range haveFiles {
-		name := f[strings.LastIndex(f, "/")+1:]
-		if !localNames[name] {
-			missingFiles = append(missingFiles, WorkspaceEntry{
-				DepotPath: f,
-				LocalPath: localDir + "/" + name,
-				Tracked:   true,
-			})
+	var entries []WorkspaceEntry
+	for _, path := range paths {
+		if entry, ok := byDepot[path]; ok {
+			entries = append(entries, entry)
 		}
 	}
-	return haveFiles, depotDirs, missingFiles, err
+	return entries, nil
 }
 
 // AddFile opens a local file for add in the default changelist.
@@ -1158,57 +1324,26 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 // Do NOT use -f here — that compares against depot HEAD, not the synced revision.
 // Works for both text (@@) and binary ("files differ") files.
 func (c *Client) HasChanges(clientFile string) (bool, error) {
-	out, err := c.run("diff", "-du", clientFile)
+	out, err := c.runZtag("diff", "-sa", clientFile)
 	if err != nil {
 		return false, err
 	}
-	return strings.Contains(out, "@@") || strings.Contains(out, "files differ"), nil
+	return len(parseZtag(out)) > 0, nil
 }
 
-// FilesDiffStatus returns the set of depot paths for open-for-edit files that
-// differ from the have revision. p4 diff exits non-zero when any file differs,
-// so stdout is captured regardless of exit code.
-func (c *Client) FilesDiffStatus() map[string]bool {
-	args := append(c.globalFlags(), "diff", "-du")
-	cmd := exec.Command("p4", args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Run() // exit code ignored — non-zero is normal when any file has changes
-
-	raw := out.String()
+// FilesDiffStatus returns opened files that differ from their have revisions.
+func (c *Client) FilesDiffStatus() (map[string]bool, error) {
+	out, err := c.runZtag("diff", "-sa")
+	if err != nil {
+		return nil, err
+	}
 	changed := map[string]bool{}
-	var currentDepot string
-	for _, line := range strings.Split(raw, "\n") {
-		if strings.HasPrefix(line, "--- //") {
-			// text diff header: --- //depot/path\tdate
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				currentDepot = parts[1]
-			}
-		} else if strings.HasPrefix(line, "==== ") {
-			// any ==== header — track depot path; Binary files use this without --- header
-			// format: ==== //depot/path#rev - /local/path ==== or ==== //depot/path#rev (Binary) ====
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				depot := parts[1]
-				if idx := strings.Index(depot, "#"); idx > 0 {
-					depot = depot[:idx]
-				}
-				currentDepot = depot
-				// if the ==== line itself says (binary), mark immediately
-				if strings.Contains(line, "(binary)") {
-					changed[depot] = true
-					currentDepot = ""
-				}
-			}
-		} else if strings.HasPrefix(line, "@@") && currentDepot != "" {
-			changed[currentDepot] = true
-		} else if strings.Contains(line, "files differ") && currentDepot != "" {
-			changed[currentDepot] = true
-			currentDepot = ""
+	for _, record := range parseZtag(out) {
+		if depot := record["depotFile"]; depot != "" {
+			changed[depot] = true
 		}
 	}
-	return changed
+	return changed, nil
 }
 
 // DeletePath marks a file or path (e.g. "//depot/stream/dir/...") for delete.
@@ -1217,16 +1352,58 @@ func (c *Client) DeletePath(path string) error {
 	return err
 }
 
-// MergeStream promotes changes from the current (child) stream up to its parent.
-// Run from a child workspace: p4 copy (no -S) copies current stream → parent.
-func (c *Client) MergeStream(_ string) (string, error) {
-	return c.run("copy")
+// MergeStream promotes a child into its parent using the parent's workspace.
+func (c *Client) MergeStream(child string) (string, error) {
+	if child == "" {
+		return "", fmt.Errorf("select the child stream to promote")
+	}
+	out, err := c.runZtag("stream", "-o", child)
+	if err != nil {
+		return "", err
+	}
+	records := parseZtag(out)
+	if len(records) == 0 || records[0]["Parent"] == "" || records[0]["Parent"] == "none" {
+		return "", fmt.Errorf("stream %s has no parent to promote into", child)
+	}
+	parent := records[0]["Parent"]
+	current, err := c.workspaceStream()
+	if err != nil {
+		return "", err
+	}
+	if current != parent {
+		return "", fmt.Errorf("promotion from %s requires a workspace mapped to parent %s; current workspace %s uses %s", child, parent, c.Workspace, current)
+	}
+	return c.run("copy", "-S", child)
 }
 
-// CopyStream brings changes from the parent stream down into targetStream (child).
-// p4 merge -S child merges from child's parent into the child stream.
+// CopyStream merges the parent into the selected child workspace.
 func (c *Client) CopyStream(targetStream string) (string, error) {
-	return c.run("merge", "-S", targetStream)
+	if targetStream == "" {
+		targetStream = c.Stream
+	}
+	if targetStream == "" {
+		return "", fmt.Errorf("select the child stream to merge into")
+	}
+	current, err := c.workspaceStream()
+	if err != nil {
+		return "", err
+	}
+	if current != targetStream {
+		return "", fmt.Errorf("merge into %s requires a workspace mapped to that stream; current workspace %s uses %s", targetStream, c.Workspace, current)
+	}
+	return c.run("merge")
+}
+
+func (c *Client) workspaceStream() (string, error) {
+	out, err := c.runZtag("client", "-o", c.Workspace)
+	if err != nil {
+		return "", err
+	}
+	records := parseZtag(out)
+	if len(records) == 0 || records[0]["Stream"] == "" {
+		return "", fmt.Errorf("workspace %s is not mapped to a stream", c.Workspace)
+	}
+	return records[0]["Stream"], nil
 }
 
 // IntegrateClassic integrates files from source to target using classic (non-stream) depot paths.
@@ -1279,6 +1456,7 @@ func (c *Client) SwitchToStream(streamPath string) error {
 		}
 	}
 	cmd := exec.Command("p4", append(c.globalFlags(), "switch", streamPath)...)
+	configureP4Command(cmd)
 	if dir != "" {
 		cmd.Dir = dir
 	}

@@ -180,6 +180,10 @@ func (p *FileListPane) rebuildRows() {
 	} else {
 		p.rebuildTree()
 	}
+	p.buildFilteredIdxs()
+	if p.filterCursor >= len(p.filteredIdxs) {
+		p.filterCursor = 0
+	}
 }
 
 func (p *FileListPane) rebuildFlat() {
@@ -280,7 +284,7 @@ func (p *FileListPane) SelectedIsHeader() bool {
 		return false
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return false
 	}
 	return p.rows[cur].kind == rowKindHeader
@@ -292,7 +296,7 @@ func (p *FileListPane) SelectedFile() *p4.OpenedFile {
 		return nil
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return nil
 	}
 	r := p.rows[cur]
@@ -324,11 +328,19 @@ func (p *FileListPane) ClearMarks() {
 // ScrollOffset returns the index of the first visible row (updated each render).
 func (p *FileListPane) ScrollOffset() int { return p.scrollOffset }
 
-func (p *FileListPane) JumpTop() { p.SetCursor(0) }
+func (p *FileListPane) JumpTop()    { p.SetCursor(0) }
 func (p *FileListPane) JumpBottom() { p.SetCursor(len(p.rows) - 1) }
 
 // SetCursor moves the cursor to idx, clamped to valid range.
 func (p *FileListPane) SetCursor(idx int) {
+	if p.filter != "" {
+		if len(p.filteredIdxs) == 0 {
+			p.filterCursor = 0
+			return
+		}
+		p.filterCursor = max(0, min(idx, len(p.filteredIdxs)-1))
+		return
+	}
 	if idx < 0 {
 		idx = 0
 	}
@@ -349,7 +361,7 @@ func (p *FileListPane) SelectedDepotPath() string {
 		return ""
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return ""
 	}
 	r := p.rows[cur]
@@ -409,7 +421,7 @@ func (p *FileListPane) SelectedHistoryPath() string {
 		return ""
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return ""
 	}
 	r := p.rows[cur]
@@ -464,7 +476,7 @@ func (p *FileListPane) IsOnCLHeader() bool {
 		return false
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return false
 	}
 	return p.rows[cur].kind == rowKindHeader
@@ -476,7 +488,7 @@ func (p *FileListPane) SelectedCL() string {
 		return ""
 	}
 	cur := p.activeCursor()
-	if cur >= len(p.rows) {
+	if cur < 0 || cur >= len(p.rows) {
 		return ""
 	}
 	return p.changelists[p.rows[cur].clIndex].ID
@@ -579,10 +591,11 @@ func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 // toggleMark marks or unmarks the file under the cursor for partial submit.
 // On a directory row it marks/unmarks all files recursively within that directory.
 func (p *FileListPane) toggleMark() {
-	if p.cursor < 0 || p.cursor >= len(p.rows) {
+	cur := p.activeCursor()
+	if cur < 0 || cur >= len(p.rows) {
 		return
 	}
-	r := p.rows[p.cursor]
+	r := p.rows[cur]
 	if r.kind == rowKindDir {
 		p.toggleMarkDir(r)
 		return
@@ -623,10 +636,11 @@ func (p *FileListPane) toggleMarkDir(r row) {
 
 // toggleDir expands or collapses the directory under the cursor.
 func (p *FileListPane) toggleDir() {
-	if p.cursor < 0 || p.cursor >= len(p.rows) {
+	cur := p.activeCursor()
+	if cur < 0 || cur >= len(p.rows) {
 		return
 	}
-	r := p.rows[p.cursor]
+	r := p.rows[cur]
 	if r.kind != rowKindDir {
 		return
 	}
@@ -643,10 +657,11 @@ func (p *FileListPane) toggleDir() {
 
 // ExpandCurrent expands the dir under the cursor. No-op if already expanded or on a file/header.
 func (p *FileListPane) ExpandCurrent() {
-	if p.cursor < 0 || p.cursor >= len(p.rows) {
+	cur := p.activeCursor()
+	if cur < 0 || cur >= len(p.rows) {
 		return
 	}
-	r := p.rows[p.cursor]
+	r := p.rows[cur]
 	if r.kind != rowKindDir || p.expanded[r.dirKey] {
 		return
 	}
@@ -664,10 +679,11 @@ func (p *FileListPane) ExpandCurrent() {
 // CollapseCurrentOrParent collapses the dir under the cursor if expanded;
 // otherwise moves to the parent dir (or CL header) and collapses it.
 func (p *FileListPane) CollapseCurrentOrParent() {
-	if p.cursor < 0 || p.cursor >= len(p.rows) {
+	cur := p.activeCursor()
+	if cur < 0 || cur >= len(p.rows) {
 		return
 	}
-	r := p.rows[p.cursor]
+	r := p.rows[cur]
 	// On an expanded dir: collapse it.
 	if r.kind == rowKindDir && p.expanded[r.dirKey] {
 		savedKey := r.dirKey
@@ -683,7 +699,7 @@ func (p *FileListPane) CollapseCurrentOrParent() {
 	}
 	// On a file or collapsed dir: move to the parent row (smaller depth or header).
 	targetDepth := r.depth - 1
-	for i := p.cursor - 1; i >= 0; i-- {
+	for i := cur - 1; i >= 0; i-- {
 		pr := p.rows[i]
 		if pr.kind == rowKindHeader || (pr.kind == rowKindDir && pr.depth == targetDepth) {
 			if pr.kind == rowKindDir && p.expanded[pr.dirKey] {
@@ -751,10 +767,11 @@ func (p *FileListPane) buildFilteredIdxs() {
 
 // activeCursor returns the effective cursor index into p.rows accounting for filter.
 func (p *FileListPane) activeCursor() int {
-	if p.filter != "" && len(p.filteredIdxs) > 0 {
-		if p.filterCursor < len(p.filteredIdxs) {
+	if p.filter != "" {
+		if p.filterCursor >= 0 && p.filterCursor < len(p.filteredIdxs) {
 			return p.filteredIdxs[p.filterCursor]
 		}
+		return -1
 	}
 	return p.cursor
 }
@@ -803,7 +820,7 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 	}
 
 	cursorW := innerW // full content width for cursor highlight
-	innerW -= 2      // right margin so text doesn't touch the border
+	innerW -= 2       // right margin so text doesn't touch the border
 	if innerW < 1 {
 		innerW = 40
 	}

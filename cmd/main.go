@@ -21,21 +21,13 @@ func main() {
 	}
 
 	client := &p4.Client{
-		Port:      cfg.P4.Port,
-		User:      cfg.P4.User,
-		Workspace: cfg.P4.Client,
+		Port:          cfg.P4.Port,
+		User:          cfg.P4.User,
+		Workspace:     cfg.P4.Client,
+		StorePassword: cfg.Auth.StorePassword,
 	}
 
-	// Trust server fingerprint if needed (safe to call every time).
-	if err := client.Trust(); err != nil {
-		if p4.IsConnectionError(err) {
-			fmt.Fprintf(os.Stderr, "error: cannot connect to Perforce server (%v)\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "warning: p4 trust failed: %v\n", err)
-	}
-
-	// Ensure we have a valid auth ticket before launching the TUI.
+	// Verify the server and resolve native identity before authentication.
 	if err := client.EnsureLoggedIn(terminalPrompt); err != nil {
 		fmt.Fprintf(os.Stderr, "auth error: %v\n", err)
 		os.Exit(1)

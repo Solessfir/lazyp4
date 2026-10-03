@@ -2,8 +2,13 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -25,10 +30,10 @@ type LinuxConfig struct {
 
 // P4Config holds Perforce connection settings.
 type P4Config struct {
-	Port       string `toml:"port"`
-	Client     string `toml:"client"`
-	User       string `toml:"user"`
-	EnvOverTOML bool   `toml:"env_over_toml"` // if true, env vars take precedence over toml values
+	Port        string `toml:"port"`
+	Client      string `toml:"client"`
+	User        string `toml:"user"`
+	EnvOverTOML bool   `toml:"env_over_toml"` // Native settings override TOML; P4CONFIG always wins.
 }
 
 // AuthConfig controls authentication behaviour.
@@ -38,25 +43,19 @@ type AuthConfig struct {
 
 // UIConfig holds display preferences.
 type UIConfig struct {
-	Theme            string `toml:"theme"`
-	FetchInterval    string `toml:"fetch_interval"`     // e.g. "10m", "30s". Empty = disabled.
-	PendingTreeView  bool   `toml:"pending_tree_view"`  // Start pending pane in tree view (default: true).
+	FetchInterval   string `toml:"fetch_interval"`    // e.g. "10m", "30s". Empty = disabled.
+	PendingTreeView bool   `toml:"pending_tree_view"` // Start pending pane in tree view (default: true).
 }
 
-// Load reads the platform config file, then overrides with env vars, then
-// overrides with a P4CONFIG file found by walking up from CWD.
-//
-// Precedence (highest → lowest):
-//
-//	P4CONFIG file in CWD (or ancestor) > env vars > lazyp4.toml
+// Load combines TOML preferences with effective native Perforce settings.
 func Load() (*Config, error) {
 	cfg := &Config{
 		P4:   P4Config{EnvOverTOML: true},
 		Auth: AuthConfig{StorePassword: false},
-		UI:   UIConfig{Theme: "dark", FetchInterval: "10m", PendingTreeView: true},
+		UI:   UIConfig{FetchInterval: "10m", PendingTreeView: true},
 	}
 
-	// 1. lazyp4.toml — read first to get EnvOverTOML flag and base P4 values.
+	// Read TOML first so its preferences control native fallbacks.
 	if path, err := configPath(); err == nil {
 		if _, err := os.Stat(path); err == nil {
 			if _, err := toml.DecodeFile(path, cfg); err != nil {
@@ -65,47 +64,11 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 2. Merge env vars according to precedence.
-	//    env_over_toml=true (default): env wins when both are set.
-	//    env_over_toml=false: toml wins; env only fills fields toml left empty.
-	envPort := os.Getenv("P4PORT")
-	envClient := os.Getenv("P4CLIENT")
-	envUser := os.Getenv("P4USER")
-	if cfg.P4.EnvOverTOML {
-		if envPort != "" {
-			cfg.P4.Port = envPort
-		}
-		if envClient != "" {
-			cfg.P4.Client = envClient
-		}
-		if envUser != "" {
-			cfg.P4.User = envUser
-		}
-	} else {
-		if cfg.P4.Port == "" {
-			cfg.P4.Port = envPort
-		}
-		if cfg.P4.Client == "" {
-			cfg.P4.Client = envClient
-		}
-		if cfg.P4.User == "" {
-			cfg.P4.User = envUser
-		}
+	settings, err := nativeSettings()
+	if err != nil {
+		return nil, err
 	}
-
-	// 3. P4CONFIG file always wins (highest priority).
-	// Only searched when $P4CONFIG names a file, matching standard p4 behaviour.
-	if p4cfg := loadP4Config(); p4cfg != nil {
-		if v, ok := p4cfg["P4PORT"]; ok {
-			cfg.P4.Port = v
-		}
-		if v, ok := p4cfg["P4CLIENT"]; ok {
-			cfg.P4.Client = v
-		}
-		if v, ok := p4cfg["P4USER"]; ok {
-			cfg.P4.User = v
-		}
-	}
+	applyNativeSettings(&cfg.P4, settings)
 
 	return cfg, nil
 }
@@ -130,46 +93,53 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "lazyp4", "lazyp4.toml"), nil
 }
 
-// loadP4Config searches CWD and its ancestors for the file named by $P4CONFIG.
-// Returns nil if $P4CONFIG is unset or no file is found.
-func loadP4Config() map[string]string {
-	name := os.Getenv("P4CONFIG")
-	if name == "" {
-		return nil
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil
-	}
-
-	for dir := cwd; ; dir = filepath.Dir(dir) {
-		path := filepath.Join(dir, name)
-		if f, err := os.Open(path); err == nil {
-			result := parseKeyValue(f)
-			f.Close()
-			return result
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-	}
-	return nil
+type nativeSetting struct {
+	value  string
+	config bool
 }
 
-// parseKeyValue reads simple KEY=VALUE lines, ignoring comments and blanks.
-func parseKeyValue(f *os.File) map[string]string {
-	m := make(map[string]string)
-	scanner := bufio.NewScanner(f)
+var nativeSourceSuffix = regexp.MustCompile(` \((config(?: '.*')?|enviro|set(?: -s)?)\)$`)
+
+func nativeSettings() (map[string]nativeSetting, error) {
+	// Let p4 handle ancestor inheritance, P4ENVIRO and platform registry settings.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command("p4", "-d", cwd, "set", "P4PORT", "P4USER", "P4CLIENT")
+	hideWindow(cmd)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("cannot read native Perforce settings (install p4 in PATH): %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return parseNativeSettings(&stdout), nil
+}
+
+func parseNativeSettings(r io.Reader) map[string]nativeSetting {
+	settings := make(map[string]nativeSetting)
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		key, value, ok := strings.Cut(strings.TrimRight(scanner.Text(), "\r"), "=")
+		if !ok || (key != "P4PORT" && key != "P4USER" && key != "P4CLIENT") {
 			continue
 		}
-		if k, v, ok := strings.Cut(line, "="); ok {
-			m[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		setting := nativeSetting{value: value}
+		if suffix := nativeSourceSuffix.FindStringSubmatchIndex(value); suffix != nil {
+			source := value[suffix[2]:suffix[3]]
+			setting.value = value[:suffix[0]]
+			setting.config = source == "config" || strings.HasPrefix(source, "config '")
+		}
+		settings[key] = setting
+	}
+	return settings
+}
+
+func applyNativeSettings(cfg *P4Config, settings map[string]nativeSetting) {
+	for key, target := range map[string]*string{"P4PORT": &cfg.Port, "P4USER": &cfg.User, "P4CLIENT": &cfg.Client} {
+		setting, ok := settings[key]
+		if ok && (setting.value != "" || setting.config) && (setting.config || cfg.EnvOverTOML || *target == "") {
+			*target = setting.value
 		}
 	}
-	return m
 }
