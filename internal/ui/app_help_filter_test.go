@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 	"github.com/solessfir/lazyp4/internal/p4"
 )
 
@@ -34,13 +35,16 @@ func TestHelpSearchMatchesDescriptionsAndKeyAliases(t *testing.T) {
 	} {
 		t.Run(test.query, func(t *testing.T) {
 			content := ansi.Strip(a.helpContentFor(test.query))
-			if !strings.Contains(content, test.want) || strings.Contains(content, "───") {
-				t.Fatalf("filtered help includes headings or lacks %q: %q", test.want, content)
+			if !strings.Contains(content, test.want) || !strings.Contains(content, "───") {
+				t.Fatalf("filtered help lacks a section heading or %q: %q", test.want, content)
 			}
 		})
 	}
 	if content := ansi.Strip(a.helpContentFor("@checkout")); strings.Contains(content, "Checkout workspace") {
 		t.Fatal("key-only search matched a description")
+	}
+	if content := ansi.Strip(a.helpContentFor("@tab")); strings.Contains(content, "─── Local") {
+		t.Fatal("filtered help retained an empty section")
 	}
 	if content := strings.ToLower(ansi.Strip(a.helpContentFor("definitely-no-such-binding"))); !strings.Contains(content, "no") || !strings.Contains(content, "match") {
 		t.Fatalf("zero matches lacks an explanation: %q", content)
@@ -109,8 +113,11 @@ func TestHelpCloseKeysNeverExecuteUnderlyingAction(t *testing.T) {
 
 func TestHelpSearchKeepsPopupHeightAndQueryOnAsyncResize(t *testing.T) {
 	a := openSearchableHelp(t, 120, 40)
-	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
 	height := lipgloss.Height(a.renderHelpModal())
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if lipgloss.Height(a.renderHelpModal()) != height {
+		t.Fatal("opening the filter field changed the anchored popup height")
+	}
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("definitely-no-such-binding")})
 	if lipgloss.Height(a.renderHelpModal()) != height {
 		t.Fatal("filter results changed the anchored popup height")
@@ -136,5 +143,66 @@ func TestHelpFilteredEndShowsLastBindingAtSmallHeight(t *testing.T) {
 	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
 	if a.helpFilter.Value() != "@" || !strings.Contains(ansi.Strip(a.renderHelpModal()), last) {
 		t.Fatalf("End failed to expose the last binding with filter intact: last %q, view %q", last, ansi.Strip(a.renderHelpModal()))
+	}
+}
+
+func TestHelpHintAndBindingCountFollowFilteringAndScrolling(t *testing.T) {
+	a := openSearchableHelp(t, 120, 40)
+	view := ansi.Strip(a.renderHelpModal())
+	if !strings.Contains(strings.Split(view, "\n")[0], "──(Type to filter) ╮") || !strings.Contains(view, "1 of 15") {
+		t.Fatalf("help lacks its filter hint or binding count: %q", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("@enter")})
+	if view = ansi.Strip(a.renderHelpModal()); !strings.Contains(view, "1 of 1") || strings.Contains(view, "(Type to filter)") {
+		t.Fatalf("filtered help has an incorrect count or redundant hint: %q", view)
+	}
+	lines := strings.Split(view, "\n")
+	if !strings.Contains(lines[len(lines)-2], "Filter ('@' for keybindings): @enter") || !strings.HasPrefix(lines[len(lines)-3], "├") || !strings.HasSuffix(lines[len(lines)-3], "┤") || !strings.Contains(view, "─── Local") {
+		t.Fatalf("filter field lacks its lower divider or matching section: %q", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nonexistent")})
+	if view = ansi.Strip(a.renderHelpModal()); !strings.Contains(view, "0 of 0") {
+		t.Fatalf("empty results retained a binding count: %q", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if view = ansi.Strip(a.renderHelpModal()); !strings.Contains(view, "2 of 15") {
+		t.Fatalf("count includes the section heading or blank row: %q", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'@'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if view = ansi.Strip(a.renderHelpModal()); !strings.Contains(view, "11 of 15") {
+		t.Fatalf("count failed to follow filtered scrolling: %q", view)
+	}
+}
+
+func TestHelpTemporarilyHidesUnderlyingSelection(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	a := New(&p4.Client{}, 0, "", false)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a.browserPane.SetRoot("//workspace")
+	selection := a.browserPane.SelectedPath()
+	if !strings.Contains(a.browserPane.View(), "48;") {
+		t.Fatal("browser lacks its initial selection highlight")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("sync")})
+	a.Update(statusMsg{text: "async operation completed"})
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a.updateFocus()
+	if strings.Contains(a.browserPane.View(), "48;") || a.active != paneBrowser || a.browserPane.SelectedPath() != selection {
+		t.Fatal("help retained the background highlight or changed the underlying selection")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !a.showHelp || strings.Contains(a.browserPane.View(), "48;") {
+		t.Fatal("clearing the filter restored the background highlight too soon")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if a.showHelp || !strings.Contains(a.browserPane.View(), "48;") || a.browserPane.SelectedPath() != selection {
+		t.Fatal("closing help failed to restore the original selection highlight")
 	}
 }

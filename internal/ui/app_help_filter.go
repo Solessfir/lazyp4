@@ -6,14 +6,33 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+func (a *App) helpPosition() (position, total int) {
+	line := 0
+	for i, row := range a.helpRowsFor(a.helpFilter.Value()) {
+		if row.section {
+			if i > 0 {
+				line++
+			}
+		} else {
+			total++
+			if position == 0 && line >= a.helpViewport.YOffset {
+				position = total
+			}
+		}
+		line++
+	}
+	return position, total
+}
+
 func (a *App) refreshHelp() {
 	a.helpViewport.Width = max(1, a.popupWidth(90)-2)
 	height := max(1, min(a.height-3, a.height*3/4-2))
-	if a.helpFilter.Value() != "" {
-		height = min(height, max(1, a.height-5))
-	}
 	rows := len(strings.Split(a.helpContentFor(""), "\n"))
-	a.helpViewport.Height = max(1, min(height, rows))
+	height = min(height, rows)
+	if a.helpFilter.Value() != "" {
+		height = max(1, min(height-2, a.height-5))
+	}
+	a.helpViewport.Height = max(1, height)
 	a.helpViewport.SetContent(a.helpContent())
 	a.helpViewport.SetYOffset(a.helpViewport.YOffset)
 }
@@ -28,15 +47,18 @@ func (a *App) handleHelpKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.showHelp = false
+		a.updateFocus()
 		a.helpFilter.Blur()
 		return a, nil
 	case "ctrl+c", "enter":
 		a.showHelp = false
+		a.updateFocus()
 		a.helpFilter.Blur()
 		return a, nil
 	case "?":
 		if a.helpFilter.Value() == "" {
 			a.showHelp = false
+			a.updateFocus()
 			a.helpFilter.Blur()
 			return a, nil
 		}

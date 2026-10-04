@@ -1321,6 +1321,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.String() == "?" {
 		a.showHelp = true
+		a.updateFocus()
 		a.helpFilter.SetValue("")
 		cmd := a.helpFilter.Focus()
 		a.refreshHelp()
@@ -2312,14 +2313,15 @@ func (a *App) cycleFocusBackward() {
 }
 
 func (a *App) updateFocus() {
-	a.browserPane.SetFocused(a.active == paneBrowser)
-	a.fileList.SetFocused(a.active == paneFileList)
-	a.streamsPane.SetFocused(a.active == paneStreams)
-	a.shelvedPane.SetFocused(a.active == paneShelved)
-	a.diff.SetFocused(a.active == paneDiff)
-	a.log.SetFocused(a.active == paneLog)
-	a.resolve.SetFocused(a.active == paneResolve)
-	a.cmdLog.SetFocused(a.active == paneCmdLog)
+	visible := !a.showHelp
+	a.browserPane.SetFocused(visible && a.active == paneBrowser)
+	a.fileList.SetFocused(visible && a.active == paneFileList)
+	a.streamsPane.SetFocused(visible && a.active == paneStreams)
+	a.shelvedPane.SetFocused(visible && a.active == paneShelved)
+	a.diff.SetFocused(visible && a.active == paneDiff)
+	a.log.SetFocused(visible && a.active == paneLog)
+	a.resolve.SetFocused(visible && a.active == paneResolve)
+	a.cmdLog.SetFocused(visible && a.active == paneCmdLog)
 	diffActive := !a.historyMode
 	a.diff.SetDiffActive(diffActive)
 	a.log.SetDiffActive(diffActive)
@@ -2707,6 +2709,7 @@ func (a *App) renderConfirmModal() string {
 
 func (a *App) renderHelpModal() string {
 	view := a.helpViewport
+	view.SetContent(a.helpContent())
 	view.Height = max(1, min(view.Height, len(strings.Split(a.helpContentFor(""), "\n"))))
 	filtering := a.helpFilter.Value() != ""
 	if filtering {
@@ -2715,8 +2718,13 @@ func (a *App) renderHelpModal() string {
 	body := view.View()
 	if filtering {
 		filter := a.helpFilter
+		filter.Prompt = "Filter ('@' for keybindings): "
+		if lipgloss.Width(filter.Prompt)+8 > view.Width {
+			filter.Prompt = "Filter: "
+		}
+		filter.Prompt = ansi.Truncate(filter.Prompt, max(0, view.Width-8), "…")
 		filter.Width = max(1, view.Width-lipgloss.Width(filter.Prompt)-1)
-		filter.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+		filter.PromptStyle = lipgloss.NewStyle()
 		filter.TextStyle = lipgloss.NewStyle()
 		position := filter.Position()
 		filter.CursorEnd()
@@ -2727,8 +2735,22 @@ func (a *App) renderHelpModal() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("4"))
 	rendered := style.Width(view.Width).Height(view.Height).Render(body)
+	if filtering {
+		lines := strings.Split(rendered, "\n")
+		lines[len(lines)-3] = styleHotkeys.Render("├" + strings.Repeat("─", view.Width) + "┤")
+		rendered = strings.Join(lines, "\n")
+	}
 	totalW := lipgloss.Width(rendered)
-	return panes.InjectTitle(rendered, "", "Keybindings", totalW, true)
+	title := "Keybindings"
+	if !filtering {
+		hint := "(Type to filter) "
+		if gap := view.Width - 3 - lipgloss.Width(title) - lipgloss.Width(hint); gap > 0 {
+			title += strings.Repeat("─", gap) + hint
+		}
+	}
+	rendered = panes.InjectTitle(rendered, "", title, totalW, true)
+	position, total := a.helpPosition()
+	return panes.InjectFooter(rendered, fmt.Sprintf("%d of %d", position, total), true)
 }
 
 func (a *App) fileListHasFiles() bool {
@@ -2744,20 +2766,17 @@ func (a *App) helpContent() string {
 	return a.helpContentFor(a.helpFilter.Value())
 }
 
-func (a *App) helpContentFor(query string) string {
-	descriptionStyle := lipgloss.NewStyle()
-	key := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+type helpRow struct {
+	k, desc string
+	section bool
+}
 
-	type row struct {
-		k, desc string
-		section bool
-	}
+func (a *App) helpRowsFor(query string) []helpRow {
 
-	var local []row
+	var local []helpRow
 	switch a.active {
 	case paneBrowser:
-		local = []row{
+		local = []helpRow{
 			{k: "enter / l", desc: "Expand directory"},
 			{k: "h", desc: "Collapse directory"},
 			{k: "space", desc: "Reconcile file or folder (edit / add / delete)"},
@@ -2769,20 +2788,20 @@ func (a *App) helpContentFor(query string) string {
 		}
 		if sel := a.browserPane.SelectedEntry(); sel != nil {
 			if sel.LocalPath != "" {
-				local = append(local, row{k: "o", desc: "Reveal in file manager"})
+				local = append(local, helpRow{k: "o", desc: "Reveal in file manager"})
 			}
-			local = append(local, row{k: "u", desc: "Revert unchanged files only"})
+			local = append(local, helpRow{k: "u", desc: "Revert unchanged files only"})
 			if !sel.IsDir {
-				local = append(local, row{k: "D", desc: "Mark for delete"})
+				local = append(local, helpRow{k: "D", desc: "Mark for delete"})
 			}
 		}
 	case paneFileList:
-		local = []row{
+		local = []helpRow{
 			{k: "t", desc: "Toggle tree / flat view"},
 			{k: "/", desc: "Filter / search"},
 		}
 		if a.fileListHasFiles() {
-			local = append([]row{
+			local = append([]helpRow{
 				{k: "space", desc: "Mark / unmark file for submit"},
 				{k: "enter", desc: "Open file"},
 				{k: "o", desc: "Reveal in file manager"},
@@ -2796,20 +2815,20 @@ func (a *App) helpContentFor(query string) string {
 			}, local...)
 		}
 		if a.resolve.HasConflicts() {
-			local = append(local, row{k: "R", desc: "Show conflicts"})
+			local = append(local, helpRow{k: "R", desc: "Show conflicts"})
 		}
 	case paneStreams:
-		local = []row{
+		local = []helpRow{
 			{k: "enter / l", desc: "Switch workspace to selected stream"},
 			{k: "i", desc: "Integrate (merge/copy)"},
 		}
 	case paneShelved:
-		local = []row{
+		local = []helpRow{
 			{k: "u", desc: "Unshelve + delete shelf"},
 			{k: "d", desc: "Delete shelf"},
 		}
 	case paneResolve:
-		local = []row{
+		local = []helpRow{
 			{k: "enter", desc: "Open merge tool for selected file"},
 			{k: "a", desc: "Automatic merge"},
 			{k: "t", desc: "Accept theirs"},
@@ -2818,12 +2837,12 @@ func (a *App) helpContentFor(query string) string {
 			{k: "esc", desc: "Close conflicts pane"},
 		}
 	case paneLog:
-		local = []row{
+		local = []helpRow{
 			{k: "space / enter", desc: "Checkout workspace to selected CL"},
 		}
 	}
 
-	global := []row{
+	global := []helpRow{
 		{k: "j / k", desc: "Navigate"},
 		{k: "J / K", desc: "Jump to bottom / top"},
 		{k: "H / L", desc: "Collapse all / Expand (browser + pending)"},
@@ -2838,29 +2857,31 @@ func (a *App) helpContentFor(query string) string {
 		{k: "esc / ?", desc: "Close this window"},
 	}
 	if a.active != paneBrowser && a.active != paneResolve {
-		global = append([]row{{k: "esc", desc: "Back to browser"}}, global...)
+		global = append([]helpRow{{k: "esc", desc: "Back to browser"}}, global...)
 	}
 	if a.opRunning && a.opCancel != nil {
-		global = append(global, row{k: "c", desc: "Cancel operation (sync / submit)"})
+		global = append(global, helpRow{k: "c", desc: "Cancel operation (sync / submit)"})
 	}
 	if !a.isStreamDepot {
-		global = append([]row{{k: "i", desc: "Integrate (classic depot)"}}, global...)
+		global = append([]helpRow{{k: "i", desc: "Integrate (classic depot)"}}, global...)
 	}
 
-	var rows []row
+	var rows []helpRow
 	if len(local) > 0 {
-		rows = append(rows, row{k: "Local", section: true})
+		rows = append(rows, helpRow{k: "Local", section: true})
 		rows = append(rows, local...)
 	}
-	rows = append(rows, row{k: "Global", section: true})
+	rows = append(rows, helpRow{k: "Global", section: true})
 	rows = append(rows, global...)
 
-	width := max(1, a.helpViewport.Width)
 	if query != "" {
 		pattern := strings.TrimPrefix(query, "@")
-		var matches []row
+		var matches []helpRow
+		var section helpRow
+		sectionAdded := false
 		for _, r := range rows {
 			if r.section {
+				section, sectionAdded = r, false
 				continue
 			}
 			text := r.desc
@@ -2868,14 +2889,27 @@ func (a *App) helpContentFor(query string) string {
 				text = formatHelpKey(r.k)
 			}
 			if panes.FuzzyMatch(pattern, text) {
+				if !sectionAdded {
+					matches = append(matches, section)
+					sectionAdded = true
+				}
 				matches = append(matches, r)
 			}
 		}
 		rows = matches
-		if len(rows) == 0 {
-			return ansi.Truncate("No matching keybindings", width, "…")
-		}
 	}
+	return rows
+}
+
+func (a *App) helpContentFor(query string) string {
+	rows := a.helpRowsFor(query)
+	width := max(1, a.helpViewport.Width)
+	if len(rows) == 0 {
+		return ansi.Truncate("No matching keybindings", width, "…")
+	}
+	descriptionStyle := lipgloss.NewStyle()
+	key := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 	keyWidth := 0
 	for i := range rows {
 		if !rows[i].section {
@@ -2884,6 +2918,8 @@ func (a *App) helpContentFor(query string) string {
 		}
 	}
 	keyWidth = min(keyWidth, max(1, width-2))
+	position, _ := a.helpPosition()
+	binding := 0
 	var sb strings.Builder
 	for i, r := range rows {
 		if r.section {
@@ -2892,10 +2928,17 @@ func (a *App) helpContentFor(query string) string {
 			}
 			sb.WriteString(ansi.Truncate(strings.Repeat(" ", keyWidth+1)+hdr.Render("─── "+r.k), width, "…"))
 		} else {
+			binding++
 			label := ansi.Truncate(r.k, keyWidth, "…")
 			label = strings.Repeat(" ", max(0, keyWidth-lipgloss.Width(label))) + label
 			description := ansi.Truncate(r.desc, max(0, width-keyWidth-1), "…")
-			sb.WriteString(ansi.Truncate(key.Render(label)+" "+descriptionStyle.Render(description), width, "…"))
+			keyStyle, descStyle := key, descriptionStyle
+			if query == a.helpFilter.Value() && binding == position {
+				background := lipgloss.Color("#292a2e")
+				keyStyle = keyStyle.Background(background).Bold(true)
+				descStyle = descStyle.Background(background).Bold(true).Width(max(0, width-keyWidth-1))
+			}
+			sb.WriteString(ansi.Truncate(keyStyle.Render(label+" ")+descStyle.Render(description), width, "…"))
 		}
 		if i < len(rows)-1 {
 			sb.WriteByte('\n')
