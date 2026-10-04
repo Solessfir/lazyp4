@@ -2,7 +2,7 @@
 
 A lazygit-inspired terminal UI for Perforce (p4).
 
-![Screenshot](Screenshot.png)
+![Screenshot](.github/Screenshot.png)
 
 > [!WARNING]
 > **Use at your own risk.** This project was built with agentic AI coding (Claude). I use lazyp4 in a production environment daily without issues, but I take no responsibility if it wipes your depot, destroys local data, or causes any other damage.
