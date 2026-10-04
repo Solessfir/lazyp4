@@ -25,6 +25,7 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Mouse support - click to focus panes and select files
 - Keyboard-driven with lazygit-style numbered pane shortcuts
 - Context-sensitive hotkey bar
+- Animated action status in the footer, with progress counts and cancellation for sync and submit
 
 ## Requirements
 

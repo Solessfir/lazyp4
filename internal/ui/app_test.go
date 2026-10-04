@@ -10,11 +10,46 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/solessfir/lazyp4/internal/p4"
 	"github.com/solessfir/lazyp4/internal/ui/panes"
 )
+
+// Inspect action results without following the spinner tick chain.
+func unwrapActivityResult(msg tea.Msg) tea.Msg {
+	switch m := msg.(type) {
+	case tea.Cmd:
+		if m == nil {
+			return nil
+		}
+		return unwrapActivityResult(m())
+	case activityDoneMsg:
+		return unwrapActivityResult(m.msg)
+	case spinner.TickMsg:
+		return nil
+	case tea.BatchMsg:
+		var commands tea.BatchMsg
+		for _, cmd := range m {
+			result := unwrapActivityResult(cmd)
+			if batch, ok := result.(tea.BatchMsg); ok {
+				commands = append(commands, batch...)
+			} else if result != nil {
+				commands = append(commands, func() tea.Msg { return result })
+			}
+		}
+		if len(commands) == 0 {
+			return nil
+		}
+		if len(commands) == 1 {
+			return commands[0]()
+		}
+		return commands
+	default:
+		return msg
+	}
+}
 
 func TestSubmitPreparationCancellation(t *testing.T) {
 	for _, completed := range []bool{false, true} {
@@ -34,8 +69,8 @@ func TestSubmitPreparationCancellation(t *testing.T) {
 				}
 			}
 			_, next := a.Update(ready)
-			if next != nil || a.opRunning || a.opCancel != nil || !strings.Contains(a.status, "cancelled") {
-				t.Fatalf("cancelled preparation started submit: running=%v, command=%v, status=%q", a.opRunning, next != nil, a.status)
+			if unwrapActivityResult(next) != nil || a.opRunning || a.opCancel != nil || !strings.Contains(a.status, "cancelled") {
+				t.Fatalf("cancelled preparation started submit: running=%v, command=%v, status=%q", a.opRunning, unwrapActivityResult(next) != nil, a.status)
 			}
 			if data, err := os.ReadFile(log); err == nil && len(data) > 0 {
 				t.Fatalf("cancelled preparation ran p4: %s", data)
@@ -148,7 +183,7 @@ func TestBrowserModeChangeRejectsPreviousDiff(t *testing.T) {
 func TestClassicDepotRootLoadUsesRootPattern(t *testing.T) {
 	log := fakeP4(t)
 	a := New(&p4.Client{}, 0, "", false)
-	msg := a.cmdBrowserLoad("//", panes.BrowserModeDepot)().(browserLoadedMsg)
+	msg := unwrapActivityResult(a.cmdBrowserLoad("//", panes.BrowserModeDepot)()).(browserLoadedMsg)
 	if msg.err != nil {
 		t.Fatal(msg.err)
 	}
@@ -203,7 +238,7 @@ func TestPendingRefreshKeepsNewestSnapshot(t *testing.T) {
 	fakeP4(t)
 	a := New(&p4.Client{}, 0, "", false)
 	oldCmd, latestCmd := a.refresh(), a.refresh()
-	old, latest := oldCmd().(refreshDoneMsg), latestCmd().(refreshDoneMsg)
+	old, latest := unwrapActivityResult(oldCmd()).(refreshDoneMsg), unwrapActivityResult(latestCmd()).(refreshDoneMsg)
 	latest.cls = []p4.Changelist{{ID: "default", Files: []p4.OpenedFile{{ClientFile: "//workspace/current.txt", DepotFile: "//depot/current.txt"}}}}
 	a.Update(latest)
 	a.fileList.SetCursor(1)
@@ -268,7 +303,7 @@ func TestWorkspaceSyncCanBeCancelledImmediately(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	for {
 		result := make(chan tea.Msg, 1)
-		go func() { result <- cmd() }()
+		go func() { result <- unwrapActivityResult(cmd()) }()
 		select {
 		case msg := <-result:
 			if end, ok := msg.(opEndMsg); ok {
@@ -436,7 +471,7 @@ func TestChangelistDiscardKeepsConfirmedScope(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("confirmed discard did not start")
 	}
-	if _, ok := cmd().(revertDoneMsg); !ok {
+	if _, ok := unwrapActivityResult(cmd()).(revertDoneMsg); !ok {
 		t.Fatal("confirmed discard failed")
 	}
 	data, err := os.ReadFile(log)
@@ -732,7 +767,7 @@ func TestPendingOpenUsesCapturedLocalMapping(t *testing.T) {
 	}
 	selected.DepotFile, selected.ClientFile = "//depot/replacement.txt", "//workspace/replacement.txt"
 	a.client.Workspace = "replacement"
-	if msg := cmd().(openFileDoneMsg); msg.err != nil {
+	if msg := unwrapActivityResult(cmd()).(openFileDoneMsg); msg.err != nil {
 		t.Fatal(msg.err)
 	}
 	var commands string
@@ -780,7 +815,7 @@ func TestDiscardAddedFileDeletesDecodedLocalPath(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("confirmed local deletion did not start")
 	}
-	if _, ok := cmd().(revertDoneMsg); !ok {
+	if _, ok := unwrapActivityResult(cmd()).(revertDoneMsg); !ok {
 		t.Fatal("added file revert did not finish")
 	}
 	if _, err := os.Stat(local); !os.IsNotExist(err) {
@@ -833,7 +868,7 @@ func TestOperationCountsFilesInsteadOfStatusLines(t *testing.T) {
 func TestDestructiveResolveRequiresScopedConfirmation(t *testing.T) {
 	a := New(&p4.Client{}, 0, "", false)
 	files := []string{"//workspace/one.txt"}
-	if _, cmd := a.Update(panes.ResolveAutoMsg{Files: files, Flags: []string{"-at"}}); cmd != nil || a.confirm == nil {
+	if _, cmd := a.Update(panes.ResolveAutoMsg{Files: files, Flags: []string{"-at"}}); unwrapActivityResult(cmd) != nil || a.confirm == nil {
 		t.Fatal("accept-theirs bypassed confirmation")
 	}
 	if a.confirm.kind != confirmKindResolve || len(a.confirm.files) != 1 || a.confirm.files[0] != files[0] {

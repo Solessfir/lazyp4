@@ -49,7 +49,7 @@ func TestHistoryCheckoutKeysRespectBusyOperations(t *testing.T) {
 					}
 					_, cmd := a.Update(key)
 					if busy {
-						if a.checkout != nil || cmd != nil {
+						if a.checkout != nil || unwrapActivityResult(cmd) != nil {
 							t.Fatal("history checkout started during another operation")
 						}
 					} else if a.checkout == nil || a.checkout.cl != "41" || a.checkout.hasFiles != open {

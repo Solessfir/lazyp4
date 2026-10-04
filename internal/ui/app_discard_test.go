@@ -65,7 +65,7 @@ func TestDiscardDeletesOnlyConfirmedAbandonedAdds(t *testing.T) {
 				t.Setenv("LAZYP4_UI_REVERT_OUTPUT", output)
 				a := New(&p4.Client{Workspace: "workspace", Root: root}, 0, "", false)
 				files := []string{"//workspace/moved.txt", "//workspace/new space%23%40%2523.txt"}
-				msg := a.cmdRevertAndDeleteLocal(files, []string{moved, selected}, clID)()
+				msg := unwrapActivityResult(a.cmdRevertAndDeleteLocal(files, []string{moved, selected}, clID)())
 				if _, failed := msg.(opDoneMsg); failed != test.malformed {
 					t.Fatalf("unexpected discard result: %#v", msg)
 				}

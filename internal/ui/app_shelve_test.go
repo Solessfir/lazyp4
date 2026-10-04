@@ -28,7 +28,7 @@ func TestShelvingBlocksMutationsUntilCompletion(t *testing.T) {
 			id := a.opID
 			a.active = paneStreams
 			_, switchCmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
-			if switchCmd != nil || a.streamSwitch != nil {
+			if unwrapActivityResult(switchCmd) != nil || a.streamSwitch != nil {
 				t.Fatal("stream switch started while shelving")
 			}
 			if a.execShelveWithDesc() != nil || a.cmdSubmitStart("default", "description") != nil || a.opID != id {
@@ -86,7 +86,7 @@ func TestCheckoutBlocksMutationsUntilCompletion(t *testing.T) {
 				id := a.opID
 				a.active = paneStreams
 				_, switchCmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
-				if switchCmd != nil || a.streamSwitch != nil {
+				if unwrapActivityResult(switchCmd) != nil || a.streamSwitch != nil {
 					t.Fatal("stream switch started while checking out")
 				}
 				if a.cmdSyncToCL("//depot/main", "100") != nil || a.cmdShelveForCheckout(&checkoutModal{cl: "100"}) != nil || a.opID != id {
@@ -125,7 +125,7 @@ func TestBusyCheckoutRetryStillShelvesOpenFiles(t *testing.T) {
 	a.checkout = co
 	key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}
 	_, cmd := a.Update(key)
-	if cmd != nil || a.checkout != co || !a.opRunning {
+	if unwrapActivityResult(cmd) != nil || a.checkout != co || !a.opRunning {
 		t.Fatal("busy confirmation changed checkout or started an operation")
 	}
 	a.opRunning = false
@@ -133,7 +133,7 @@ func TestBusyCheckoutRetryStillShelvesOpenFiles(t *testing.T) {
 	if cmd == nil || a.checkout != nil || !a.opRunning {
 		t.Fatal("checkout retry did not start after the other operation completed")
 	}
-	if msg := cmd().(syncToCLDoneMsg); msg.err != nil {
+	if msg := unwrapActivityResult(cmd()).(syncToCLDoneMsg); msg.err != nil {
 		t.Fatal(msg.err)
 	}
 	data, err := os.ReadFile(log)

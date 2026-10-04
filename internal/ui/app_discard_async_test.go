@@ -21,7 +21,7 @@ func TestQueuedDiscardCheckRejectsNewerOperation(t *testing.T) {
 				}
 				a := New(&p4.Client{}, 0, "", false)
 				check := a.cmdRevertCheck("//workspace/selected.txt", "41")
-				msg := check().(revertCheckMsg)
+				msg := unwrapActivityResult(check()).(revertCheckMsg)
 				if msg.hasChanges != changed {
 					t.Fatalf("discard check returned changed=%v", msg.hasChanges)
 				}
@@ -38,7 +38,7 @@ func TestQueuedDiscardCheckRejectsNewerOperation(t *testing.T) {
 				}
 				_, cmd := a.Update(msg)
 				if timing != "before" {
-					if cmd != nil || a.confirm != nil {
+					if unwrapActivityResult(cmd) != nil || a.confirm != nil {
 						t.Fatal("obsolete check started discard or opened confirmation")
 					}
 				} else {
@@ -51,7 +51,7 @@ func TestQueuedDiscardCheckRejectsNewerOperation(t *testing.T) {
 					if cmd == nil {
 						t.Fatal("current discard did not run")
 					}
-					cmd()
+					unwrapActivityResult(cmd())
 				}
 				commands, err := os.ReadFile(log)
 				if err != nil {
@@ -85,7 +85,7 @@ func TestBusyDiscardConfirmationPreservesScopeForRetry(t *testing.T) {
 				input = tea.KeyMsg{Type: tea.KeyEnter}
 			}
 			_, cmd := a.Update(input)
-			if cmd != nil || a.confirm != confirmation {
+			if unwrapActivityResult(cmd) != nil || a.confirm != confirmation {
 				t.Fatal("busy acceptance ran discard or lost its confirmation")
 			}
 			if _, err := os.Stat(local); err != nil {
@@ -102,7 +102,7 @@ func TestBusyDiscardConfirmationPreservesScopeForRetry(t *testing.T) {
 			if cmd == nil || a.confirm != nil {
 				t.Fatal("idle retry did not accept the preserved confirmation")
 			}
-			cmd()
+			unwrapActivityResult(cmd())
 			commands, err := os.ReadFile(log)
 			if err != nil || !strings.Contains(string(commands), "revert -c 41 //workspace/selected.txt") || strings.Contains(string(commands), "other.txt") {
 				t.Fatalf("retry lost captured discard scope: %s, error %v", commands, err)
@@ -120,7 +120,7 @@ func TestBusyDiscardConfirmationCanCancel(t *testing.T) {
 	a.cmdSubmitMarkedFilter([]p4.OpenedFile{{ClientFile: "//workspace/other.txt", Action: p4.ActionAdd}}, "description")
 	t.Cleanup(a.opCancel)
 	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd != nil || a.confirm != nil || !a.opRunning {
+	if unwrapActivityResult(cmd) != nil || a.confirm != nil || !a.opRunning {
 		t.Fatal("Escape did not cancel the confirmation independently of the operation")
 	}
 }
@@ -135,7 +135,7 @@ func TestQueuedDiscardCheckRejectsStreamSwitch(t *testing.T) {
 				}
 				a := New(&p4.Client{Workspace: "workspace", Stream: "//streams/old"}, 0, "", false)
 				check := a.cmdRevertCheck("//workspace/selected.txt", "41")
-				msg := check().(revertCheckMsg)
+				msg := unwrapActivityResult(check()).(revertCheckMsg)
 				id := a.opID
 				a.streamSwitch = &streamSwitchModal{stream: "//streams/new", switching: phase != "confirmation"}
 				if phase == "completed" {
@@ -145,7 +145,7 @@ func TestQueuedDiscardCheckRejectsStreamSwitch(t *testing.T) {
 					t.Fatal("stream switch unexpectedly changed operation generation")
 				}
 				_, cmd := a.Update(msg)
-				if cmd != nil || a.confirm != nil {
+				if unwrapActivityResult(cmd) != nil || a.confirm != nil {
 					t.Fatal("queued check started discard or opened confirmation across stream switch")
 				}
 				commands, err := os.ReadFile(log)

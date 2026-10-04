@@ -17,11 +17,11 @@ func TestInfoRejectsObsoleteResponses(t *testing.T) {
 			a := New(&p4.Client{Workspace: "workspace"}, 0, "", false)
 			a.browserPane.ToggleMode()
 			oldCmd, latestCmd := a.cmdInfo(), a.cmdInfo()
-			latest := latestCmd().(infoFetchedMsg)
+			latest := unwrapActivityResult(latestCmd()).(infoFetchedMsg)
 			latest.info = p4.WorkspaceInfo{Client: "workspace", Root: "/current", Stream: "//streams/current"}
 			a.Update(latest)
 			epoch := a.browserEpoch
-			old := oldCmd().(infoFetchedMsg)
+			old := unwrapActivityResult(oldCmd()).(infoFetchedMsg)
 			if old.request >= latest.request {
 				t.Fatal("info commands did not capture separate request generations")
 			}
@@ -34,7 +34,7 @@ func TestInfoRejectsObsoleteResponses(t *testing.T) {
 				old.err = errors.New("Your session has expired")
 			}
 			_, cmd := a.Update(old)
-			if cmd != nil || a.browserEpoch != epoch || a.client.Root != "/current" || a.client.Stream != "//streams/current" || a.browserPane.RootPath() != "//streams/current" || a.offlineMode || a.authModal != nil {
+			if unwrapActivityResult(cmd) != nil || a.browserEpoch != epoch || a.client.Root != "/current" || a.client.Stream != "//streams/current" || a.browserPane.RootPath() != "//streams/current" || a.offlineMode || a.authModal != nil {
 				t.Fatal("obsolete info changed the current workspace or error state")
 			}
 		})
@@ -88,7 +88,7 @@ func TestInfoUnchangedIdentityRetriesInitialBrowserLoad(t *testing.T) {
 	a.browserPane.SetRoots("//streams/main", "//workspace")
 	a.browserNavTarget = "//workspace/pending.txt"
 	a.cmdInfo()
-	_, cmd := a.Update(infoFetchedMsg{request: a.infoRequest, info: p4.WorkspaceInfo{Client: "workspace", Root: "/workspace", Stream: "//streams/main"}})
+	_, cmd := a.update(infoFetchedMsg{request: a.infoRequest, info: p4.WorkspaceInfo{Client: "workspace", Root: "/workspace", Stream: "//streams/main"}})
 	if cmd == nil || len(cmd().(tea.BatchMsg)) != 6 || a.browserEpoch != 0 || a.browserNavTarget != "//workspace/pending.txt" {
 		t.Fatal("same-identity info did not retry initial loading while preserving navigation")
 	}
@@ -165,18 +165,18 @@ func TestLoginReloadsInitialData(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("login did not resume initial loading")
 	}
-	batch, ok := cmd().(tea.BatchMsg)
+	batch, ok := unwrapActivityResult(cmd()).(tea.BatchMsg)
 	if !ok || len(batch) != 2 {
 		t.Fatal("login did not retry initial data commands")
 	}
 	loaded := map[string]bool{}
 	for _, command := range batch {
-		msg := command()
+		msg := unwrapActivityResult(command())
 		loaded[fmt.Sprintf("%T", msg)] = true
 		_, followup := a.Update(msg)
 		if _, info := msg.(infoFetchedMsg); info && followup != nil {
-			for _, metadata := range followup().(tea.BatchMsg) {
-				result := metadata()
+			for _, metadata := range unwrapActivityResult(followup()).(tea.BatchMsg) {
+				result := unwrapActivityResult(metadata())
 				loaded[fmt.Sprintf("%T", result)] = true
 				a.Update(result)
 			}

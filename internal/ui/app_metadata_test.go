@@ -30,7 +30,7 @@ func TestMetadataRejectsObsoleteResponses(t *testing.T) {
 				case "shelves":
 					oldCmd, currentCmd = a.cmdLoadShelved(), a.cmdLoadShelved()
 				}
-				old, current := oldCmd(), currentCmd()
+				old, current := unwrapActivityResult(oldCmd()), unwrapActivityResult(currentCmd())
 				switch kind {
 				case "current CL":
 					o, c := old.(currentCLFetchedMsg), current.(currentCLFetchedMsg)
@@ -51,10 +51,10 @@ func TestMetadataRejectsObsoleteResponses(t *testing.T) {
 					old, current = o, c
 				}
 				a.Update(current)
-				before := a.View()
 				if invalidate == "info query" {
 					a.cmdInfo()
 				}
+				before := a.View()
 				a.Update(old)
 				if a.View() != before || kind == "streams" && (len(a.streams) != 2 || a.streams[0].Path != "//current/a") {
 					t.Fatal("obsolete metadata replaced the current result")
@@ -68,11 +68,11 @@ func TestFetchRejectsObsoleteErrors(t *testing.T) {
 	fakeP4(t)
 	a := New(&p4.Client{}, 0, "", false)
 	oldCmd, currentCmd := a.cmdFetch(), a.cmdFetch()
-	current := currentCmd().(fetchDoneMsg)
+	current := unwrapActivityResult(currentCmd()).(fetchDoneMsg)
 	current.count = 4
 	a.Update(current)
 	status := a.status
-	old := oldCmd().(fetchDoneMsg)
+	old := unwrapActivityResult(oldCmd()).(fetchDoneMsg)
 	old.err = errors.New("Connect to server failed")
 	a.Update(old)
 	if a.offlineMode || a.status != status {
@@ -89,7 +89,7 @@ func TestStreamSwitchQueriesMetadataAfterInfo(t *testing.T) {
 	log := fakeP4(t)
 	a := New(&p4.Client{Workspace: "workspace", Stream: "//streams/previous"}, 0, "", false)
 	_, cmd := a.Update(streamSwitchedMsg{stream: "//streams/current"})
-	batch := cmd().(tea.BatchMsg)
+	batch := unwrapActivityResult(cmd()).(tea.BatchMsg)
 	for _, command := range batch {
 		command()
 	}
@@ -98,10 +98,10 @@ func TestStreamSwitchQueriesMetadataAfterInfo(t *testing.T) {
 		t.Fatalf("post-switch metadata queried the previous stream before info: %s", data)
 	}
 	_, followup := a.Update(infoFetchedMsg{request: a.infoRequest, info: p4.WorkspaceInfo{Client: "workspace", Stream: "//streams/current"}})
-	batch = followup().(tea.BatchMsg)
+	batch = unwrapActivityResult(followup()).(tea.BatchMsg)
 	seenCL, seenFetch, seenShelves := false, false, false
 	for _, command := range batch {
-		switch command().(type) {
+		switch unwrapActivityResult(command()).(type) {
 		case currentCLFetchedMsg:
 			seenCL = true
 		case fetchDoneMsg:
