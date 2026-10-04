@@ -191,3 +191,7 @@ Unshelve deletes the shelf only after every shelved file is confirmed restored. 
 ## Development checks
 
 Run `go test ./...` and `go vet ./...`. Native configuration tests run when `p4` is in PATH. Set `LAZYP4_TEST_P4D` to a `p4d` executable to also run server integration tests against temporary loopback servers and workspaces. CI runs these separately from the platform test matrix.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
