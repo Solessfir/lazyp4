@@ -557,6 +557,38 @@ func TestPerforceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("partial unshelve does not count filename success markers", func(t *testing.T) {
+		blocked := filepath.Join(root, "blocked - unshelved.txt")
+		write(blocked, "blocked base\n")
+		run("add", blocked)
+		run("submit", "-d", "unshelve marker base")
+		cl, err := c.CreateChange("unshelve marker shelf")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run("edit", "-c", cl, a, blocked)
+		write(a, "shelved selected edit\n")
+		write(blocked, "preserve blocked shelf content\n")
+		if _, err := c.Shelve(cl); err != nil {
+			t.Fatal(err)
+		}
+		run("revert", a, blocked)
+		run("delete", blocked)
+		if err := c.UnshelveAndDelete(cl); err == nil {
+			t.Fatal("partial unshelve succeeded because a filename contained the success marker")
+		}
+		files, err := c.shelvedFiles(cl)
+		if err != nil || len(files) != 2 {
+			t.Fatalf("partial unshelve lost shelf: %#v, error %v", files, err)
+		}
+		run("revert", a, blocked)
+		if err := c.DeleteShelf(cl); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DeleteChange(cl); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("change detection compares text and binary have revisions", func(t *testing.T) {
 		binary := filepath.Join(root, "asset.bin")
 		write(binary, "\x00binary base\x01")
@@ -715,6 +747,78 @@ func TestPerforceIntegration(t *testing.T) {
 	})
 	c.Workspace, c.Root, c.Stream = "stream-child", childRoot, "//streams/dev"
 	run("sync")
+	t.Run("scoped shelf cleanup preserves switched stream edits", func(t *testing.T) {
+		previous := *c
+		defer func() { *c = previous }()
+		input("Stream: //streams/shelf-safe\nOwner: audit\nName: shelf-safe\nParent: //streams/main\nType: development\nParentView: inherit\nOptions: allsubmit unlocked toparent fromparent mergedown\nPaths:\n\tshare ...\n", "stream", "-i")
+		run("populate", "-d", "shelf-safe base", "//streams/main/...", "//streams/shelf-safe/...")
+		switchRoot := filepath.Join(base, "shelf-switch")
+		if err := os.MkdirAll(switchRoot, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		input(fmt.Sprintf("Client: shelf-switch\nOwner: audit\nRoot: %s\nStream: //streams/main\n", switchRoot), "client", "-i")
+		c.Workspace, c.Root, c.Stream = "shelf-switch", switchRoot, "//streams/main"
+		run("sync")
+		if err := c.SwitchToStream("//streams/shelf-safe"); err != nil {
+			t.Fatal(err)
+		}
+		local := filepath.Join(switchRoot, "main.txt")
+		clientPath := "//shelf-switch/main.txt"
+		run("edit", clientPath)
+		write(local, "preserve destination stream edits\n")
+		if err := c.SwitchToStream("//streams/main"); err != nil {
+			t.Fatal(err)
+		}
+		run("edit", clientPath)
+		write(local, "selected source shelf\n")
+		cl, err := c.CreateChange("selected source shelf")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Reopen(cl, clientPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.ShelveFiles(cl, []string{clientPath}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Reopen("default", clientPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SwitchToStream("//streams/shelf-safe"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.RevertCL(cl, []string{clientPath}); err != nil {
+			t.Fatal(err)
+		}
+		content, err := os.ReadFile(local)
+		if err != nil || string(content) != "preserve destination stream edits\n" {
+			t.Fatalf("shelf cleanup discarded switched edits: %q, error %v", content, err)
+		}
+		opened, err := c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].DepotFile != "//streams/shelf-safe/main.txt" {
+			t.Fatalf("shelf cleanup reverted destination: %#v, error %v", opened, err)
+		}
+		run("revert", clientPath)
+		c.Stream = "//streams/shelf-safe"
+		if err := c.UnshelveAndDelete(cl); err == nil {
+			t.Fatal("cross-stream unshelve deleted a shelf whose identities could not be verified")
+		}
+		opened, err = c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].DepotFile != "//streams/shelf-safe/main.txt" {
+			t.Fatalf("cross-stream retry did not unshelve destination: %#v, error %v", opened, err)
+		}
+		files, err := c.shelvedFiles(cl)
+		if err != nil || len(files) != 1 || files[0].DepotFile != "//streams/main/main.txt" {
+			t.Fatalf("cross-stream retry lost source shelf: %#v, error %v", files, err)
+		}
+		run("revert", clientPath)
+		if err := c.DeleteShelf(cl); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DeleteChange(cl); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("browser maps stream imports and remappings", func(t *testing.T) {
 		_, files, err := c.BrowserWorkspaceFast("//stream-child/project/libs")
 		if err != nil || len(files) != 1 || files[0].DepotPath != "//depot/old/file with spaces.txt" || files[0].ClientPath != "//stream-child/project/libs/file with spaces.txt" {

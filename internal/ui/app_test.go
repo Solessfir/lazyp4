@@ -418,7 +418,7 @@ func TestSelectedShelvingUsesExplicitFiles(t *testing.T) {
 			if !strings.Contains(commands, "shelve -c 12 //workspace/selected.txt") {
 				t.Fatalf("shelf lost explicit file scope: %s", commands)
 			}
-			if strings.Contains(commands, "revert //workspace/selected.txt") == noRevert {
+			if strings.Contains(commands, "revert -c 12 //workspace/selected.txt") == noRevert {
 				t.Fatalf("shelf did not honor revert preference: %s", commands)
 			}
 		})

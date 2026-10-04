@@ -898,52 +898,63 @@ func (c *Client) UnshelveAndDelete(clID string) error {
 	if len(expected) == 0 {
 		return fmt.Errorf("shelf has no files to unshelve; shelf was preserved")
 	}
-	tryUnshelve := func(extraArgs ...string) (out string, runErr error) {
-		args := append(c.globalFlags(), "unshelve", "-s", clID)
-		args = append(args, extraArgs...)
-		cmd := exec.Command("p4", args...)
-		configureP4Command(cmd)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		runErr = cmd.Run()
-		out = stdout.String() + stderr.String()
-		return
-	}
-
-	out, runErr := tryUnshelve()
-	unshelved := strings.Contains(out, " - unshelved")
-
-	// If nothing was unshelved and we have a stream, retry with -S for cross-stream remapping.
-	if !unshelved && c.Stream != "" {
-		out2, runErr2 := tryUnshelve("-S", c.Stream)
-		if strings.Contains(out2, " - unshelved") {
-			out, runErr = out2, runErr2
-			unshelved = true
+	args := []string{"unshelve", "-s", clID}
+	for attempt := 0; ; attempt++ {
+		out, err := c.runZtag(args...)
+		if err != nil {
+			return fmt.Errorf("unshelve: %w", err)
 		}
-	}
-
-	unshelved = strings.Contains(out, " - unshelved")
-	needsResolve := strings.Contains(out, "needs resolve")
-
-	if runErr != nil {
-		return fmt.Errorf("unshelve: %s: %s", runErr, strings.TrimSpace(out))
-	}
-	if !unshelved {
-		return fmt.Errorf("no files unshelved — shelf was preserved")
-	}
-	if needsResolve {
-		// Files are open but require resolve before the shelf can be deleted.
-		return fmt.Errorf("files unshelved with conflicts — shelf kept, delete manually after resolving")
-	}
-	count := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, " - unshelved") {
-			count++
+		files := make(map[string]bool)
+		var resultErr error
+		unmapped := false
+		invalid := false
+		decoder := json.NewDecoder(strings.NewReader(out))
+		for decoder.More() {
+			var record map[string]interface{}
+			if err := decoder.Decode(&record); err != nil {
+				return fmt.Errorf("unshelve: %w", err)
+			}
+			if message, ok := record["data"]; ok {
+				resultErr = fmt.Errorf("unshelve: %v; shelf was preserved", message)
+				if record["generic"] == float64(17) && record["severity"] == float64(2) {
+					unmapped = true
+				} else {
+					invalid = true
+				}
+				continue
+			}
+			path, _ := record["depotFile"].(string)
+			action, _ := record["action"].(string)
+			if path == "" || action == "" || record["rev"] == nil {
+				resultErr = fmt.Errorf("unshelve result could not be verified; shelf was preserved")
+				invalid = true
+				continue
+			}
+			switch Action(action) {
+			case ActionEdit, ActionAdd, ActionDelete, ActionBranch, ActionInteg, ActionMove, ActionMoveD:
+			default:
+				resultErr = fmt.Errorf("unshelve action could not be verified; shelf was preserved")
+				invalid = true
+				continue
+			}
+			files[path] = true
 		}
-	}
-	if count != len(expected) {
-		return fmt.Errorf("unshelved %d of %d files; shelf was preserved", count, len(expected))
+		if len(files) == 0 && attempt == 0 && c.Stream != "" && unmapped && !invalid {
+			args = append(args, "-S", c.Stream)
+			continue
+		}
+		if resultErr != nil {
+			return resultErr
+		}
+		if len(files) != len(expected) {
+			return fmt.Errorf("unshelved %d of %d files; shelf was preserved", len(files), len(expected))
+		}
+		for _, file := range expected {
+			if !files[file.DepotFile] {
+				return fmt.Errorf("unshelved file identities could not be verified; shelf was preserved")
+			}
+		}
+		break
 	}
 	if _, err := c.run("shelve", "-d", "-c", clID); err != nil {
 		if strings.Contains(err.Error(), "needs resolve") || strings.Contains(err.Error(), "Shelve aborted") {

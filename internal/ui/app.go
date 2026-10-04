@@ -76,7 +76,6 @@ type checkoutModal struct {
 	cl       string // target CL number
 	stream   string // stream root path
 	hasFiles bool   // true = open files exist, show shelve prompt first
-	shelving bool   // true = currently in "shelve then sync" phase
 }
 
 // streamSwitchModal tracks an in-progress p4 switch invocation.
@@ -208,29 +207,36 @@ type infoFetchedMsg struct {
 	err     error
 }
 
-type currentCLFetchedMsg struct{ cl string }
+type currentCLFetchedMsg struct {
+	request uint64
+	cl      string
+}
 
 type streamsFetchedMsg struct {
+	request uint64
 	streams []p4.StreamInfo
 	err     error
 }
 
 type fetchDoneMsg struct {
-	count int
-	err   error
+	request uint64
+	count   int
+	err     error
 }
 
 type tickMsg time.Time
 
 type shelveDoneMsg struct {
+	id    uint64
 	count int
 	clID  string // non-empty when a whole CL was shelved
 	err   error
 }
 
 type shelvedDoneMsg struct {
-	cls []p4.ShelvedCL
-	err error
+	request uint64
+	cls     []p4.ShelvedCL
+	err     error
 }
 
 type unshelveDeleteDoneMsg struct {
@@ -268,6 +274,7 @@ type moveDoneMsg struct {
 }
 
 type syncToCLDoneMsg struct {
+	id  uint64
 	cl  string
 	err error
 }
@@ -344,6 +351,10 @@ type App struct {
 	diffRequest       uint64
 	refreshRequest    uint64
 	infoRequest       uint64
+	currentCLRequest  uint64
+	streamsRequest    uint64
+	fetchRequest      uint64
+	shelvedRequest    uint64
 	logRequest        uint64
 	resolveRequest    uint64
 	resolvePath       string
@@ -398,7 +409,7 @@ func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string
 
 // Init triggers the first data load and workspace info fetch.
 func (a *App) Init() tea.Cmd {
-	cmds := []tea.Cmd{a.refresh(), a.cmdInfo(), a.cmdFetch(), a.cmdLoadShelved()}
+	cmds := []tea.Cmd{a.refresh(), a.cmdInfo()}
 	if a.fetchInterval > 0 {
 		cmds = append(cmds, tea.Tick(a.fetchInterval, func(t time.Time) tea.Msg { return tickMsg(t) }))
 	}
@@ -451,8 +462,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.checkout = nil
 				a.status = "Cancelled"
 			case "enter", "y", "Y", "l":
-				if co.hasFiles && !co.shelving {
-					co.shelving = true
+				if co.hasFiles {
 					return a, a.cmdShelveForCheckout(co)
 				}
 				a.checkout = nil
@@ -837,6 +847,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.refresh()
 
 	case shelveDoneMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
+		a.opRunning = false
 		if m.err != nil {
 			a.status = "shelve failed: " + m.err.Error()
 			a.cmdLog.Add("p4 shelve", "error: "+m.err.Error())
@@ -851,6 +865,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.refresh(), a.cmdLoadShelved())
 
 	case shelvedDoneMsg:
+		if m.request != a.shelvedRequest {
+			return a, nil
+		}
 		if m.err == nil {
 			a.shelvedPane.SetCLs(m.cls)
 			a.relayout() // update pending height too
@@ -878,6 +895,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.cmdLoadShelved()
 
 	case currentCLFetchedMsg:
+		if m.request != a.currentCLRequest {
+			return a, nil
+		}
 		a.log.SetCurrentCL(m.cl)
 		return a, nil
 
@@ -912,7 +932,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.client.Port = m.info.ServerAddr
 			}
 			a.statusPane.SetInfo(m.info)
-			cmds := []tea.Cmd{a.cmdFetchCurrentCL()}
+			cmds := []tea.Cmd{a.cmdFetchCurrentCL(), a.cmdFetch(), a.cmdLoadShelved()}
 			a.isStreamDepot = m.info.Stream != ""
 			if a.isStreamDepot {
 				cmds = append(cmds, a.cmdStreams(m.info.Stream))
@@ -958,6 +978,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case streamsFetchedMsg:
+		if m.request != a.streamsRequest {
+			return a, nil
+		}
 		if m.err == nil && len(m.streams) > 1 {
 			a.streams = m.streams
 			a.showStreams = true
@@ -967,6 +990,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case fetchDoneMsg:
+		if m.request != a.fetchRequest {
+			return a, nil
+		}
 		if m.err != nil {
 			if p4.IsConnectionError(m.err) {
 				a.setOffline(true)
@@ -1120,6 +1146,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case syncToCLDoneMsg:
+		if m.id != a.opID {
+			return a, nil
+		}
+		a.opRunning = false
 		if m.err != nil {
 			a.status = "checkout failed: " + m.err.Error()
 			a.cmdLog.Add("p4 sync @"+m.cl, "error: "+m.err.Error())
@@ -1142,7 +1172,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = "Logged in"
 			a.cmdLog.Add("p4 login", "done")
-			return a, tea.Batch(a.refresh(), a.cmdInfo(), a.cmdFetch(), a.cmdLoadShelved())
+			return a, tea.Batch(a.refresh(), a.cmdInfo())
 		}
 		return a, nil
 
@@ -1154,7 +1184,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = "Stream switched to " + m.stream
 			a.cmdLog.Add("p4 switch "+m.stream, "done")
-			return a, tea.Batch(a.cmdInfo(), a.refresh(), a.cmdFetch(), a.cmdLoadShelved())
+			return a, tea.Batch(a.cmdInfo(), a.refresh())
 		}
 		return a, nil
 
@@ -1986,6 +2016,10 @@ func (a *App) filesToShelve() []p4.OpenedFile {
 }
 
 func (a *App) execShelveWithDesc() tea.Cmd {
+	if a.opRunning {
+		a.status = a.opName + " in progress"
+		return nil
+	}
 	client := *a.client
 	m := a.shelveModal
 	a.shelveModal = nil
@@ -1995,6 +2029,12 @@ func (a *App) execShelveWithDesc() tea.Cmd {
 	}
 	files := m.files
 	noRevert := m.noRevert
+	a.opRunning = true
+	a.opName = "Shelving"
+	a.opTotal = len(files)
+	a.opDone = 0
+	a.opID++
+	id := a.opID
 	clientFiles := make([]string, len(files))
 	for i, f := range files {
 		clientFiles[i] = f.ClientFile
@@ -2002,22 +2042,22 @@ func (a *App) execShelveWithDesc() tea.Cmd {
 	return func() tea.Msg {
 		clID, err := client.CreateChange(desc)
 		if err != nil {
-			return shelveDoneMsg{err: err}
+			return shelveDoneMsg{id: id, err: err}
 		}
 		for _, f := range files {
 			if _, err := client.Reopen(clID, f.ClientFile); err != nil {
-				return shelveDoneMsg{err: err}
+				return shelveDoneMsg{id: id, err: err}
 			}
 		}
 		if _, err := client.ShelveFiles(clID, clientFiles); err != nil {
-			return shelveDoneMsg{err: err}
+			return shelveDoneMsg{id: id, err: err}
 		}
 		if !noRevert {
-			if _, err := client.RevertFiles(clientFiles); err != nil {
-				return shelveDoneMsg{err: err}
+			if _, err := client.RevertCL(clID, clientFiles); err != nil {
+				return shelveDoneMsg{id: id, err: err}
 			}
 		}
-		return shelveDoneMsg{count: len(files)}
+		return shelveDoneMsg{id: id, count: len(files)}
 	}
 }
 
@@ -2407,7 +2447,10 @@ func (a *App) renderProgressBar() string {
 		count = styleHotkeys.Render(fmt.Sprintf("%d/%d files", a.opDone, a.opTotal))
 	}
 
-	cancelHint := styleHotkeys.Render("c - ") + styleHotkeyKey.Render("cancel")
+	var cancelHint string
+	if a.opCancel != nil {
+		cancelHint = styleHotkeys.Render("c - ") + styleHotkeyKey.Render("cancel")
+	}
 	left := " " + styleHotkeys.Render(a.opName) + "  " + bar + "  " + count
 	leftW := lipgloss.Width(left)
 	cancelW := lipgloss.Width(cancelHint)
@@ -2529,7 +2572,7 @@ func (a *App) renderModal() string {
 func (a *App) renderCheckoutModal() string {
 	co := a.checkout
 	var content string
-	if co.hasFiles && !co.shelving {
+	if co.hasFiles {
 		content = styleModalTitle.Render(fmt.Sprintf("Sync to CL %s", co.cl)) +
 			"\n\n" +
 			styleStatus.Render("You have open files in your workspace.") +
@@ -2762,7 +2805,7 @@ func (a *App) helpContent() string {
 	if a.active != paneBrowser && a.active != paneResolve {
 		global = append([]row{{k: "esc", desc: "Back to browser"}}, global...)
 	}
-	if a.opRunning {
+	if a.opRunning && a.opCancel != nil {
 		global = append(global, row{k: "c", desc: "Cancel operation (sync / submit)"})
 	}
 	if !a.isStreamDepot {
@@ -2798,6 +2841,10 @@ func (a *App) helpContent() string {
 
 func (a *App) cmdInfo() tea.Cmd {
 	a.infoRequest++
+	a.currentCLRequest++
+	a.streamsRequest++
+	a.fetchRequest++
+	a.shelvedRequest++
 	request := a.infoRequest
 	client := *a.client
 	return func() tea.Msg {
@@ -2811,10 +2858,12 @@ func (a *App) cmdInfo() tea.Cmd {
 }
 
 func (a *App) cmdLoadShelved() tea.Cmd {
+	a.shelvedRequest++
+	request := a.shelvedRequest
 	client := *a.client
 	return func() tea.Msg {
 		cls, err := client.ShelvedCLs()
-		return shelvedDoneMsg{cls: cls, err: err}
+		return shelvedDoneMsg{request: request, cls: cls, err: err}
 	}
 }
 
@@ -2835,26 +2884,32 @@ func (a *App) cmdDeleteShelf(clID string) tea.Cmd {
 }
 
 func (a *App) cmdStreams(streamPath string) tea.Cmd {
+	a.streamsRequest++
+	request := a.streamsRequest
 	client := *a.client
 	return func() tea.Msg {
 		depotPath := p4.DepotFromStream(streamPath)
 		streams, err := client.Streams(depotPath)
-		return streamsFetchedMsg{streams: streams, err: err}
+		return streamsFetchedMsg{request: request, streams: streams, err: err}
 	}
 }
 
 func (a *App) cmdFetchCurrentCL() tea.Cmd {
+	a.currentCLRequest++
+	request := a.currentCLRequest
 	client := *a.client
 	return func() tea.Msg {
-		return currentCLFetchedMsg{cl: client.CurrentCL()}
+		return currentCLFetchedMsg{request: request, cl: client.CurrentCL()}
 	}
 }
 
 func (a *App) cmdFetch() tea.Cmd {
+	a.fetchRequest++
+	request := a.fetchRequest
 	client := *a.client
 	return func() tea.Msg {
 		count, err := client.SyncDryRun()
-		return fetchDoneMsg{count: count, err: err}
+		return fetchDoneMsg{request: request, count: count, err: err}
 	}
 }
 
@@ -3413,11 +3468,20 @@ func (a *App) cmdForceSync(path string) tea.Cmd {
 }
 
 func (a *App) cmdSyncToCL(stream, cl string) tea.Cmd {
+	if a.opRunning {
+		a.status = a.opName + " in progress"
+		return nil
+	}
+	a.opRunning = true
+	a.opName = "Checking out"
+	a.opTotal, a.opDone = 0, 0
+	a.opID++
+	id := a.opID
 	client := *a.client
 	a.status = fmt.Sprintf("Syncing to CL %s...", cl)
 	return func() tea.Msg {
 		err := client.SyncToCL(stream, cl)
-		return syncToCLDoneMsg{cl: cl, err: err}
+		return syncToCLDoneMsg{id: id, cl: cl, err: err}
 	}
 }
 
@@ -3445,6 +3509,10 @@ func (a *App) cmdSwitchToStream(stream string) tea.Cmd {
 
 // cmdShelveForCheckout consolidates all open files into one shelf, reverts them, then syncs.
 func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
+	if a.opRunning {
+		a.status = a.opName + " in progress"
+		return nil
+	}
 	client := *a.client
 	a.checkout = nil
 	a.status = fmt.Sprintf("Shelving open files before sync to CL %s...", co.cl)
@@ -3454,32 +3522,37 @@ func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
 	for _, c := range a.fileList.Changelists() {
 		allFiles = append(allFiles, c.Files...)
 	}
-	currentCL := client.CurrentCL()
-	desc := "CL " + currentCL + " → CL " + cl
-	if currentCL == "" {
-		desc = "→ CL " + cl
-	}
+	a.opRunning = true
+	a.opName = "Checking out"
+	a.opTotal, a.opDone = len(allFiles), 0
+	a.opID++
+	id := a.opID
 	return func() tea.Msg {
+		currentCL := client.CurrentCL()
+		desc := "CL " + currentCL + " → CL " + cl
+		if currentCL == "" {
+			desc = "→ CL " + cl
+		}
 		clID, err := client.CreateChange(desc)
 		if err != nil {
-			return syncToCLDoneMsg{cl: cl, err: err}
+			return syncToCLDoneMsg{id: id, cl: cl, err: err}
 		}
 		for _, f := range allFiles {
 			if _, err := client.Reopen(clID, f.ClientFile); err != nil {
-				return syncToCLDoneMsg{cl: cl, err: err}
+				return syncToCLDoneMsg{id: id, cl: cl, err: err}
 			}
 		}
 		if _, err := client.Shelve(clID); err != nil {
-			return syncToCLDoneMsg{cl: cl, err: err}
+			return syncToCLDoneMsg{id: id, cl: cl, err: err}
 		}
 		clientFiles := make([]string, len(allFiles))
 		for i, f := range allFiles {
 			clientFiles[i] = f.ClientFile
 		}
-		if _, err := client.RevertFiles(clientFiles); err != nil {
-			return syncToCLDoneMsg{cl: cl, err: err}
+		if _, err := client.RevertCL(clID, clientFiles); err != nil {
+			return syncToCLDoneMsg{id: id, cl: cl, err: err}
 		}
-		return syncToCLDoneMsg{cl: cl, err: client.SyncToCL(stream, cl)}
+		return syncToCLDoneMsg{id: id, cl: cl, err: client.SyncToCL(stream, cl)}
 	}
 }
 

@@ -157,6 +157,8 @@ Pull selects a child stream and merges its parent into the current child workspa
 | `u` | Unshelve + delete shelf |
 | `d` | Delete shelf |
 
+Unshelve deletes the shelf only after every shelved file is confirmed restored. Failed or partial unshelves retain the complete shelf. Cross-stream unshelves using `-S` retain the source shelf because remapped file identities cannot be verified automatically.
+
 ### Conflicts pane
 
 | Key | Action |

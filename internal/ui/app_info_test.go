@@ -89,7 +89,7 @@ func TestInfoUnchangedIdentityRetriesInitialBrowserLoad(t *testing.T) {
 	a.browserNavTarget = "//workspace/pending.txt"
 	a.cmdInfo()
 	_, cmd := a.Update(infoFetchedMsg{request: a.infoRequest, info: p4.WorkspaceInfo{Client: "workspace", Root: "/workspace", Stream: "//streams/main"}})
-	if cmd == nil || len(cmd().(tea.BatchMsg)) != 4 || a.browserEpoch != 0 || a.browserNavTarget != "//workspace/pending.txt" {
+	if cmd == nil || len(cmd().(tea.BatchMsg)) != 6 || a.browserEpoch != 0 || a.browserNavTarget != "//workspace/pending.txt" {
 		t.Fatal("same-identity info did not retry initial loading while preserving navigation")
 	}
 }
@@ -166,14 +166,21 @@ func TestLoginReloadsInitialData(t *testing.T) {
 		t.Fatal("login did not resume initial loading")
 	}
 	batch, ok := cmd().(tea.BatchMsg)
-	if !ok || len(batch) != 4 {
+	if !ok || len(batch) != 2 {
 		t.Fatal("login did not retry initial data commands")
 	}
 	loaded := map[string]bool{}
 	for _, command := range batch {
 		msg := command()
 		loaded[fmt.Sprintf("%T", msg)] = true
-		a.Update(msg)
+		_, followup := a.Update(msg)
+		if _, info := msg.(infoFetchedMsg); info && followup != nil {
+			for _, metadata := range followup().(tea.BatchMsg) {
+				result := metadata()
+				loaded[fmt.Sprintf("%T", result)] = true
+				a.Update(result)
+			}
+		}
 	}
 	for _, kind := range []string{"ui.refreshDoneMsg", "ui.infoFetchedMsg", "ui.fetchDoneMsg", "ui.shelvedDoneMsg"} {
 		if !loaded[kind] {
