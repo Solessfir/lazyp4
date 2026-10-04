@@ -474,6 +474,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if a.confirm != nil && keyInput {
 		if m, ok := msg.(tea.KeyMsg); ok {
+			if a.opRunning {
+				switch m.String() {
+				case "enter", "y", "Y", "l", "d":
+					a.status = a.opName + " in progress"
+					return a, nil
+				}
+			}
 			switch m.String() {
 			case "enter", "y", "Y", "l":
 				c := a.confirm
@@ -824,6 +831,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case revertCheckMsg:
+		if m.id != a.opID || m.infoRequest != a.infoRequest || a.opRunning || a.streamSwitch != nil {
+			return a, nil
+		}
 		if m.hasChanges {
 			a.confirm = &confirmModal{kind: confirmKindRevert, files: []string{m.clientFile}, clID: m.clID}
 		} else {
@@ -1340,7 +1350,8 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.status = a.opName + " in progress"
 			return a, nil
 		}
-		if (m.String() == "enter" || m.String() == "l") && (a.active == paneStreams || a.active == paneLog) || m.String() == " " && a.active == paneBrowser {
+		if (m.String() == "enter" || m.String() == "l") && (a.active == paneStreams || a.active == paneLog) ||
+			m.String() == " " && (a.active == paneBrowser || a.active == paneLog) {
 			a.status = a.opName + " in progress"
 			return a, nil
 		}
@@ -1756,9 +1767,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case "1", "2", "3", "4", "5", "6":
-		order := a.paneOrder()
+		order := []activePane{paneBrowser, paneFileList, paneStreams, paneShelved, a.currentRightPane()}
 		n := int(m.String()[0]-'0') - 1
-		if n >= 0 && n < len(order) {
+		if n >= 0 && n < len(order) && (order[n] != paneStreams || a.showStreams) {
 			a.active = order[n]
 			a.updateFocus()
 		}
@@ -1861,7 +1872,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case paneDiff:
 		cmd = a.diff.Update(m)
 	case paneLog:
-		if a.historyMode && (m.String() == "space" || m.String() == "enter") {
+		if a.historyMode && (m.String() == " " || m.String() == "enter") {
 			cl := a.log.SelectedChange()
 			if cl != "" {
 				stream := ""
@@ -3196,12 +3207,16 @@ func (a *App) cmdAutoResolve(files, flags []string) tea.Cmd {
 }
 
 type revertCheckMsg struct {
-	clientFile string
-	hasChanges bool
-	clID       string
+	id          uint64
+	infoRequest uint64
+	clientFile  string
+	hasChanges  bool
+	clID        string
 }
 
 func (a *App) cmdRevertCheck(clientFile, clID string) tea.Cmd {
+	id := a.opID
+	infoRequest := a.infoRequest
 	client := *a.client
 	return func() tea.Msg {
 		hasChanges, err := client.HasChanges(clientFile)
@@ -3209,7 +3224,7 @@ func (a *App) cmdRevertCheck(clientFile, clID string) tea.Cmd {
 			// if we can't determine, assume changed and show modal
 			hasChanges = true
 		}
-		return revertCheckMsg{clientFile: clientFile, hasChanges: hasChanges, clID: clID}
+		return revertCheckMsg{id: id, infoRequest: infoRequest, clientFile: clientFile, hasChanges: hasChanges, clID: clID}
 	}
 }
 
