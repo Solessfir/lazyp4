@@ -21,19 +21,22 @@ func cursorStyle(focused bool) lipgloss.Style {
 	return styleCursor.UnsetBackground()
 }
 
-func fuzzyMatch(pattern, s string) bool {
+// FuzzyMatch reports whether pattern is a case-insensitive subsequence of s.
+func FuzzyMatch(pattern, s string) bool {
 	if pattern == "" {
 		return true
 	}
-	s = strings.ToLower(s)
-	pattern = strings.ToLower(pattern)
+	patternRunes := []rune(strings.ToLower(pattern))
 	pi := 0
-	for i := 0; i < len(s) && pi < len(pattern); i++ {
-		if s[i] == pattern[pi] {
+	for _, r := range strings.ToLower(s) {
+		if r == patternRunes[pi] {
 			pi++
+			if pi == len(patternRunes) {
+				return true
+			}
 		}
 	}
-	return pi == len(pattern)
+	return false
 }
 
 // InjectTitle replaces the top border line of a rendered lipgloss box with

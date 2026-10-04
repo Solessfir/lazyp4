@@ -98,6 +98,8 @@ lazyp4 verifies the connection before requesting a password and never accepts an
 
 Press `?` inside the app for context-sensitive help.
 
+Type to fuzzy-search descriptions, or start with `@` to search keys. Use arrow keys, Page Up/Down, Home, and End to scroll. Escape clears a filter first, then closes help; Ctrl+C or Enter closes it immediately.
+
 ### Global
 
 | Key | Action |

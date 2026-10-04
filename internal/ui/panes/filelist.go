@@ -770,7 +770,7 @@ func (p *FileListPane) buildFilteredIdxs() {
 	// first pass: find matching file rows per CL
 	matchingCLs := map[int]bool{}
 	for _, r := range p.rows {
-		if r.kind == rowKindFile && fuzzyMatch(p.filter, r.label) {
+		if r.kind == rowKindFile && FuzzyMatch(p.filter, r.label) {
 			matchingCLs[r.clIndex] = true
 		}
 	}
@@ -782,7 +782,7 @@ func (p *FileListPane) buildFilteredIdxs() {
 				p.filteredIdxs = append(p.filteredIdxs, i)
 			}
 		case rowKindFile:
-			if fuzzyMatch(p.filter, r.label) {
+			if FuzzyMatch(p.filter, r.label) {
 				p.filteredIdxs = append(p.filteredIdxs, i)
 			}
 		}

@@ -369,7 +369,7 @@ func (p *BrowserPane) filteredRows() []browserRow {
 	if len(p.searchIndex) > 0 {
 		var out []browserRow
 		for _, n := range p.searchIndex {
-			if fuzzyMatch(p.filter, n.name) {
+			if FuzzyMatch(p.filter, n.name) {
 				out = append(out, browserRow{node: n, depth: 0})
 			}
 		}
@@ -380,7 +380,7 @@ func (p *BrowserPane) filteredRows() []browserRow {
 	p.collectNodes(p.root, 0, &all)
 	var out []browserRow
 	for _, r := range all {
-		if fuzzyMatch(p.filter, r.node.name) {
+		if FuzzyMatch(p.filter, r.node.name) {
 			out = append(out, r)
 		}
 	}

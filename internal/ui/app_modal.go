@@ -76,7 +76,10 @@ func (a *App) modalHotkeys() string {
 	case a.modal != nil:
 		return "Submit: <enter> | Close/Cancel: <esc>"
 	case a.showHelp:
-		return "Scroll: j/k | Close: <esc>"
+		if a.helpFilter.Value() != "" {
+			return "Search: type (@keys) | Clear: <esc> | Close: <ctrl+c>"
+		}
+		return "Search: type (@keys) | Scroll: <up>/<down> | Close: <esc>"
 	}
 	return ""
 }

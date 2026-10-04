@@ -380,11 +380,15 @@ type App struct {
 	showHelp       bool
 	selectMode     bool // mouse disabled so terminal can select text
 	helpViewport   viewport.Model
+	helpFilter     textinput.Model
 }
 
 // New creates the root App model.
 func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string, pendingTreeView bool) *App {
 	hv := viewport.New(54, 20)
+	filter := textinput.New()
+	filter.Prompt = "/ "
+	filter.Placeholder = "Filter descriptions (@keys)"
 	fl := panes.NewFileListPane()
 	if !pendingTreeView {
 		fl.ToggleMode()
@@ -405,6 +409,7 @@ func New(client *p4.Client, fetchInterval time.Duration, linuxFileManager string
 		resolve:          panes.NewResolvePane(),
 		cmdLog:           panes.NewCmdLogPane(),
 		helpViewport:     hv,
+		helpFilter:       filter,
 	}
 	a.historyMode = true
 	a.updateFocus()
@@ -1298,6 +1303,8 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.shelveModal.input, cmd = a.shelveModal.input.Update(msg)
 	case a.modal != nil:
 		a.modal.input, cmd = a.modal.input.Update(msg)
+	case a.showHelp:
+		a.helpFilter, cmd = a.helpFilter.Update(msg)
 	}
 	return a, cmd
 }
@@ -1309,24 +1316,16 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.EnableMouseCellMotion
 	}
 
-	if m.String() == "?" {
-		a.showHelp = !a.showHelp
-		if a.showHelp {
-			a.helpViewport.SetContent(a.helpContent())
-			a.helpViewport.GotoTop()
-		}
-		return a, nil
-	}
 	if a.showHelp {
-		switch m.String() {
-		case "j", "down":
-			a.helpViewport.LineDown(1)
-		case "k", "up":
-			a.helpViewport.LineUp(1)
-		default:
-			a.showHelp = false
-		}
-		return a, nil
+		return a.handleHelpKey(m)
+	}
+	if m.String() == "?" {
+		a.showHelp = true
+		a.helpFilter.SetValue("")
+		cmd := a.helpFilter.Focus()
+		a.refreshHelp()
+		a.helpViewport.GotoTop()
+		return a, cmd
 	}
 
 	// When the active pane is in filter mode, route all keys to the pane so
@@ -2370,14 +2369,7 @@ func (a *App) relayout() {
 	a.resolve.SetSize(rightW, diffH)
 	a.cmdLog.SetWidth(a.width)
 
-	helpW := max(1, a.popupWidth(90)-2)
-	helpH := max(1, min(a.height-3, a.height*3/4-2))
-	a.helpViewport.Width = helpW
-	a.helpViewport.Height = helpH
-	if a.showHelp {
-		a.helpViewport.SetContent(a.helpContent())
-		a.helpViewport.SetYOffset(a.helpViewport.YOffset)
-	}
+	a.refreshHelp()
 }
 
 // View renders the full TUI.
@@ -2715,11 +2707,26 @@ func (a *App) renderConfirmModal() string {
 
 func (a *App) renderHelpModal() string {
 	view := a.helpViewport
-	view.Height = max(1, min(view.Height, view.TotalLineCount()))
+	view.Height = max(1, min(view.Height, len(strings.Split(a.helpContentFor(""), "\n"))))
+	filtering := a.helpFilter.Value() != ""
+	if filtering {
+		view.Height = min(view.Height, max(1, a.height-5))
+	}
+	body := view.View()
+	if filtering {
+		filter := a.helpFilter
+		filter.Width = max(1, view.Width-lipgloss.Width(filter.Prompt)-1)
+		filter.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+		filter.TextStyle = lipgloss.NewStyle()
+		position := filter.Position()
+		filter.CursorEnd()
+		filter.SetCursor(position)
+		body += "\n" + styleHotkeys.Render(strings.Repeat("─", view.Width)) + "\n" + ansi.Truncate(filter.View(), view.Width, "")
+	}
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("4"))
-	rendered := style.Width(view.Width).Height(view.Height).Render(view.View())
+	rendered := style.Width(view.Width).Height(view.Height).Render(body)
 	totalW := lipgloss.Width(rendered)
 	return panes.InjectTitle(rendered, "", "Keybindings", totalW, true)
 }
@@ -2734,6 +2741,10 @@ func (a *App) fileListHasFiles() bool {
 }
 
 func (a *App) helpContent() string {
+	return a.helpContentFor(a.helpFilter.Value())
+}
+
+func (a *App) helpContentFor(query string) string {
 	descriptionStyle := lipgloss.NewStyle()
 	key := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
@@ -2845,6 +2856,26 @@ func (a *App) helpContent() string {
 	rows = append(rows, global...)
 
 	width := max(1, a.helpViewport.Width)
+	if query != "" {
+		pattern := strings.TrimPrefix(query, "@")
+		var matches []row
+		for _, r := range rows {
+			if r.section {
+				continue
+			}
+			text := r.desc
+			if strings.HasPrefix(query, "@") {
+				text = formatHelpKey(r.k)
+			}
+			if panes.FuzzyMatch(pattern, text) {
+				matches = append(matches, r)
+			}
+		}
+		rows = matches
+		if len(rows) == 0 {
+			return ansi.Truncate("No matching keybindings", width, "…")
+		}
+	}
 	keyWidth := 0
 	for i := range rows {
 		if !rows[i].section {

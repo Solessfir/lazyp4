@@ -93,7 +93,7 @@ func TestHelpSmallViewportScrollPreservesContext(t *testing.T) {
 	a.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
 	before := a.helpViewport.View()
-	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if a.helpViewport.YOffset != 1 || a.helpViewport.View() == before {
 		t.Fatal("help key scroll did not change the visible rows")
 	}
@@ -101,9 +101,22 @@ func TestHelpSmallViewportScrollPreservesContext(t *testing.T) {
 	if a.helpViewport.YOffset != 4 || !a.showHelp || a.active != paneResolve {
 		t.Fatal("help wheel scroll changed pane context or failed to scroll")
 	}
-	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if a.helpViewport.YOffset != 3 {
 		t.Fatal("help up key did not scroll back")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if a.helpViewport.YOffset != max(0, a.helpViewport.TotalLineCount()-a.helpViewport.Height) {
+		t.Fatal("End did not reach the last help page")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyHome})
+	a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if a.helpViewport.YOffset == 0 {
+		t.Fatal("Page Down did not scroll help")
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if a.helpViewport.YOffset != 0 {
+		t.Fatal("Page Up did not return to the first page")
 	}
 	a.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if a.showHelp || a.active != paneResolve {
