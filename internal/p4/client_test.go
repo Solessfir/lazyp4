@@ -2,6 +2,7 @@ package p4
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -68,6 +69,31 @@ func TestResolveCommandKeepsScopeAndConnection(t *testing.T) {
 	}
 	if _, err := c.ResolveCommand(""); err == nil {
 		t.Fatal("interactive resolve accepted an empty scope")
+	}
+	local := filepath.Join(c.Root, "odd#@%.txt")
+	cmd, err = c.ResolveCommand(local)
+	if err != nil || cmd.Args[len(cmd.Args)-1] != escapeFileSpec(local) {
+		t.Fatalf("local resolve command = %#v, error %v", cmd, err)
+	}
+}
+
+func TestFileSpecsPreserveServerSyntaxAndLocalScope(t *testing.T) {
+	for path, want := range map[string]string{
+		"odd#@%.txt":                       "odd%23%40%25.txt",
+		"literal%23.txt":                   "literal%2523.txt",
+		"folder#@%/...":                    "folder%23%40%25/...",
+		"folder#@%/*":                      "folder%23%40%25/*",
+		`C:\folder#@%\*`:                   `C:\folder%23%40%25\*`,
+		"*":                                "*",
+		"...":                              "...",
+		"/tmp/literal*name.txt":            "/tmp/literal%2Aname.txt",
+		"//depot/odd%23%40%25.txt#2":       "//depot/odd%23%40%25.txt#2",
+		"//workspace/odd%23%40%25.txt@123": "//workspace/odd%23%40%25.txt@123",
+		"//workspace/folder%23%40%25/...":  "//workspace/folder%23%40%25/...",
+	} {
+		if got := fileSpec(path); got != want {
+			t.Errorf("fileSpec(%q) = %q; want %q", path, got, want)
+		}
 	}
 }
 

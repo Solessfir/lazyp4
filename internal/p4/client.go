@@ -113,7 +113,7 @@ func (c *Client) runWithStdin(stdin string, args ...string) (string, error) {
 }
 
 func (c *Client) whereFiles(paths []string) (string, error) {
-	output, err := c.runWithStdin(strings.Join(paths, "\n")+"\n", "-ztag", "-Mj", "-x", "-", "where")
+	output, err := c.runWithStdin(strings.Join(fileSpecs(paths), "\n")+"\n", "-ztag", "-Mj", "-x", "-", "where")
 	if err != nil {
 		return "", err
 	}
@@ -197,7 +197,7 @@ func GroupByChangelist(files []OpenedFile) []Changelist {
 // "(... files differ ...)" line with a size summary.
 func (c *Client) Diff(clientFile string) (string, error) {
 	// Force permits offline edits; an explicit have revision avoids comparing against HEAD.
-	out, err := c.run("diff", "-du", "-f", clientFile+"#have")
+	out, err := c.run("diff", "-du", "-f", fileSpec(clientFile)+"#have")
 	// p4 diff exits non-zero when files differ; for binary files the marker is
 	// "(... files differ ...)" — treat this as success, not an error.
 	if strings.Contains(out, "files differ") {
@@ -221,7 +221,7 @@ func (c *Client) annotateBinaryDiff(raw, clientFile string) string {
 	}
 
 	headSize := ""
-	if fout, _ := c.run("fstat", "-Ol", clientFile); fout != "" {
+	if fout, _ := c.run("fstat", "-Ol", fileSpec(clientFile)); fout != "" {
 		for _, line := range strings.Split(fout, "\n") {
 			if after, ok := strings.CutPrefix(strings.TrimSpace(line), "... headSize "); ok {
 				if n, err := strconv.ParseInt(strings.TrimSpace(after), 10, 64); err == nil {
@@ -302,12 +302,15 @@ func (c *Client) ShelveFiles(clID string, clientFiles []string) (string, error) 
 	if len(clientFiles) == 0 {
 		return "", fmt.Errorf("select files to shelve")
 	}
-	args := append([]string{"shelve", "-c", clID}, clientFiles...)
+	args := append([]string{"shelve", "-c", clID}, fileSpecs(clientFiles)...)
 	return c.run(args...)
 }
 
 // Submit submits a changelist and streams output lines into lines.
 func (c *Client) Submit(ctx context.Context, clID, description string, lines chan<- string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if clID == "" || clID == "default" {
 		args := c.globalFlags()
 		args = append(args, "submit")
@@ -327,6 +330,9 @@ func (c *Client) Submit(ctx context.Context, clID, description string, lines cha
 
 // SubmitMarked moves selected files into a new changelist and submits it.
 func (c *Client) SubmitMarked(ctx context.Context, files []OpenedFile, description string, lines chan<- string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(files) == 0 {
 		return fmt.Errorf("select files to submit")
 	}
@@ -367,7 +373,11 @@ func (c *Client) streamCommand(ctx context.Context, lines chan<- string, args ..
 			}
 		}
 	}
-	if err := cmd.Wait(); err != nil {
+	err = cmd.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return fmt.Errorf("%s", msg)
 		}
@@ -378,7 +388,7 @@ func (c *Client) streamCommand(ctx context.Context, lines chan<- string, args ..
 
 // RevertFiles discards local changes for the given files in a single p4 revert call.
 func (c *Client) RevertFiles(clientFiles []string) (string, error) {
-	args := append([]string{"revert"}, clientFiles...)
+	args := append([]string{"revert"}, fileSpecs(clientFiles)...)
 	return c.run(args...)
 }
 
@@ -392,7 +402,7 @@ func (c *Client) RevertUnchanged(clID string) error {
 // RevertUnchangedPaths reverts the given paths (client files or local paths with wildcards)
 // that are identical to the depot version. Returns an error only on p4 failures.
 func (c *Client) RevertUnchangedPaths(paths []string) error {
-	args := append([]string{"revert", "-a"}, paths...)
+	args := append([]string{"revert", "-a"}, fileSpecs(paths)...)
 	_, err := c.run(args...)
 	return err
 }
@@ -439,7 +449,7 @@ func (c *Client) FindCLByDescription(desc string) (string, error) {
 
 // ReopenFiles moves the given files to a different changelist.
 func (c *Client) ReopenFiles(clID string, clientFiles []string) (string, error) {
-	args := append([]string{"reopen", "-c", clID}, clientFiles...)
+	args := append([]string{"reopen", "-c", clID}, fileSpecs(clientFiles)...)
 	return c.run(args...)
 }
 
@@ -448,13 +458,13 @@ func (c *Client) RevertCL(clID string, clientFiles []string) (string, error) {
 	if clID == "" || len(clientFiles) == 0 {
 		return "", fmt.Errorf("a changelist and selected files are required to revert")
 	}
-	args := append([]string{"revert", "-c", clID}, clientFiles...)
+	args := append([]string{"revert", "-c", clID}, fileSpecs(clientFiles)...)
 	return c.run(args...)
 }
 
 // Reopen moves a file to a different changelist.
 func (c *Client) Reopen(clID, clientFile string) (string, error) {
-	return c.run("reopen", "-c", clID, clientFile)
+	return c.run("reopen", "-c", clID, fileSpec(clientFile))
 }
 
 // DeleteChange deletes an empty pending changelist.
@@ -536,7 +546,7 @@ func (c *Client) Changes(path string, max int) ([]FilelogEntry, error) {
 	if max > 0 {
 		args = append(args, "-m", strconv.Itoa(max))
 	}
-	args = append(args, path)
+	args = append(args, fileSpec(path))
 	out, err := c.run(args...)
 	if err != nil {
 		return nil, err
@@ -605,7 +615,7 @@ func (c *Client) Filelog(depotFile string, max int) ([]FilelogEntry, error) {
 	if max > 0 {
 		args = append(args, "-m", strconv.Itoa(max))
 	}
-	args = append(args, depotFile)
+	args = append(args, fileSpec(depotFile))
 	out, err := c.runZtag(args...)
 	if err != nil {
 		return nil, err
@@ -643,7 +653,7 @@ func (c *Client) AutoResolve(clientFile string, flags []string) error {
 	for _, flag := range flags {
 		args := []string{"resolve", flag}
 		if clientFile != "" {
-			args = append(args, clientFile)
+			args = append(args, fileSpec(clientFile))
 		}
 		if _, err := c.run(args...); err != nil {
 			lastErr = err
@@ -659,7 +669,7 @@ func (c *Client) AutoResolve(clientFile string, flags []string) error {
 func (c *Client) ResolveList(path string) ([]ConflictFile, error) {
 	args := []string{"resolve", "-n"}
 	if path != "" {
-		args = append(args, path)
+		args = append(args, fileSpec(path))
 	}
 	out, err := c.run(args...)
 	if err != nil {
@@ -883,11 +893,11 @@ func (c *Client) DeleteShelf(clID string) error {
 
 // ForceSyncPath runs p4 sync -f on the given depot path (file or wildcard).
 func (c *Client) SyncPath(depotPath string) (string, error) {
-	return c.run("sync", depotPath)
+	return c.run("sync", fileSpec(depotPath))
 }
 
 func (c *Client) ForceSyncPath(depotPath string) (string, error) {
-	return c.run("sync", "-f", depotPath)
+	return c.run("sync", "-f", fileSpec(depotPath))
 }
 
 // WhereLocal converts a depot path to a local filesystem path using p4 where.
@@ -904,7 +914,7 @@ func (c *Client) ResolveCommand(file string) (*exec.Cmd, error) {
 	if strings.TrimSpace(file) == "" {
 		return nil, fmt.Errorf("select a file to resolve")
 	}
-	cmd := exec.Command("p4", append(c.globalFlags(), "resolve", file)...)
+	cmd := exec.Command("p4", append(c.globalFlags(), "resolve", fileSpec(file))...)
 	if c.Root != "" {
 		cmd.Dir = c.Root
 	}
@@ -921,7 +931,7 @@ func (c *Client) WhereClient(path string) (string, error) {
 }
 
 func (c *Client) where(path string) (map[string]string, error) {
-	out, err := c.runZtag("where", path)
+	out, err := c.runZtag("where", fileSpec(path))
 	if err != nil {
 		return nil, err
 	}
@@ -942,9 +952,12 @@ func (c *Client) where(path string) (map[string]string, error) {
 }
 
 // Reconcile runs p4 reconcile on the given local path to detect offline changes
-// (edit, add, delete). Uses -m for mtime-based detection and -f to force
-// re-reconcile already-open files.
+// (edit, add, delete). Uses -m for mtime-based detection and -f for literal special filenames.
 func (c *Client) Reconcile(localPath string) (string, error) {
+	// -f takes literal filenames, but directory wildcards still use encoded filespecs.
+	if strings.HasSuffix(localPath, "/...") || strings.HasSuffix(localPath, `\...`) || strings.HasSuffix(localPath, "/*") || strings.HasSuffix(localPath, `\*`) {
+		localPath = fileSpec(localPath)
+	}
 	return c.run("reconcile", "-m", "-f", localPath)
 }
 
@@ -1004,7 +1017,7 @@ func (c *Client) isAllWrite() (bool, error) {
 }
 
 func (c *Client) haveLocalPaths(localWildcard string) (localPaths, depotPaths []string, err error) {
-	out, runErr := c.run("have", localWildcard)
+	out, runErr := c.run("have", fileSpec(localWildcard))
 	if runErr != nil {
 		msg := runErr.Error()
 		if strings.Contains(msg, "not on client") || strings.Contains(msg, "no such file") {
@@ -1034,7 +1047,7 @@ func (c *Client) haveLocalPaths(localWildcard string) (localPaths, depotPaths []
 }
 
 func (c *Client) openedDepotPaths(localWildcard string) (map[string]bool, error) {
-	out, err := c.run("opened", localWildcard)
+	out, err := c.run("opened", fileSpec(localWildcard))
 	if err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "not opened") || strings.Contains(msg, "no file") {
@@ -1057,7 +1070,7 @@ func (c *Client) openedDepotPaths(localWildcard string) (map[string]bool, error)
 
 // Edit opens the given local path for edit. Accepts wildcards (e.g. /path/...).
 func (c *Client) Edit(localPath string) (string, error) {
-	return c.run("edit", localPath)
+	return c.run("edit", fileSpec(localPath))
 }
 
 // BrowserDirs lists immediate subdirectories at the given wildcard path (e.g. "//depot/stream/*").
@@ -1176,6 +1189,27 @@ func (c *Client) BrowserWorkspaceFast(depotPath string) (dirs []string, files []
 
 func escapeFileSpec(path string) string {
 	return strings.NewReplacer("%", "%25", "@", "%40", "#", "%23", "*", "%2A").Replace(path)
+}
+
+// Depot and client paths already use encoded filespecs; local paths contain literal filenames.
+func fileSpec(path string) string {
+	if strings.HasPrefix(path, "//") {
+		return path
+	}
+	wildcard := ""
+	if path == "*" || strings.HasSuffix(path, "/*") || strings.HasSuffix(path, `\*`) {
+		path = strings.TrimSuffix(path, "*")
+		wildcard = "*"
+	}
+	return escapeFileSpec(path) + wildcard
+}
+
+func fileSpecs(paths []string) []string {
+	result := make([]string, len(paths))
+	for i, path := range paths {
+		result[i] = fileSpec(path)
+	}
+	return result
 }
 
 func (c *Client) workspaceDirectory(path string) (local, client string, err error) {
@@ -1324,7 +1358,7 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 // Do NOT use -f here — that compares against depot HEAD, not the synced revision.
 // Works for both text (@@) and binary ("files differ") files.
 func (c *Client) HasChanges(clientFile string) (bool, error) {
-	out, err := c.runZtag("diff", "-sa", clientFile)
+	out, err := c.runZtag("diff", "-sa", fileSpec(clientFile))
 	if err != nil {
 		return false, err
 	}
@@ -1348,7 +1382,7 @@ func (c *Client) FilesDiffStatus() (map[string]bool, error) {
 
 // DeletePath marks a file or path (e.g. "//depot/stream/dir/...") for delete.
 func (c *Client) DeletePath(path string) error {
-	_, err := c.run("delete", path)
+	_, err := c.run("delete", fileSpec(path))
 	return err
 }
 
@@ -1408,7 +1442,7 @@ func (c *Client) workspaceStream() (string, error) {
 
 // IntegrateClassic integrates files from source to target using classic (non-stream) depot paths.
 func (c *Client) IntegrateClassic(source, target string) (string, error) {
-	return c.run("integrate", source, target)
+	return c.run("integrate", fileSpec(source), fileSpec(target))
 }
 
 // SyncDryRun returns the number of changelists the workspace is behind head.

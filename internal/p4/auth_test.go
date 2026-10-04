@@ -1,6 +1,7 @@
 package p4
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Reuse the test executable as a portable CLI fixture without a second build.
@@ -64,11 +66,51 @@ func TestMain(m *testing.M) {
 				os.Exit(2)
 			}
 		}
+	case "submit":
+		if marker := os.Getenv("LAZYP4_AUTH_SUBMIT_BLOCK"); marker != "" {
+			if err := os.WriteFile(marker, nil, 0600); err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(time.Minute)
+		} else {
+			os.Exit(2)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "unexpected authentication command")
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func TestSubmitCancellationBeforeOutput(t *testing.T) {
+	authCLI(t)
+	marker := filepath.Join(t.TempDir(), "submit-started")
+	t.Setenv("LAZYP4_AUTH_SUBMIT_BLOCK", marker)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- (&Client{}).Submit(ctx, "default", "", nil) }()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("submit exited before cancellation: %v", err)
+		case <-ctx.Done():
+			t.Fatal("submit did not start before timeout")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("submit cancellation error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit did not stop after cancellation")
+	}
 }
 
 func authCLI(t *testing.T) string {

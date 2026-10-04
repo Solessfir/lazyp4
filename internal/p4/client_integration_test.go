@@ -2,6 +2,7 @@ package p4
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -45,23 +46,38 @@ func TestPerforceIntegration(t *testing.T) {
 	t.Setenv("P4ENVIRO", filepath.Join(base, "enviro"))
 	t.Setenv("P4TICKETS", filepath.Join(base, "tickets"))
 	t.Setenv("P4TRUST", filepath.Join(base, "trust"))
-	server := exec.Command(p4d, "-r", db, "-p", port, "-v", "security=0", "-L", filepath.Join(base, "server.log"), "-J", filepath.Join(base, "journal"))
-	configureP4Command(server)
-	if err := server.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { server.Process.Kill(); server.Wait() })
 	c := &Client{Port: port, User: "audit", Workspace: "audit", Root: root}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if _, err := c.run("info"); err == nil {
-			break
+	startServer := func() *exec.Cmd {
+		t.Helper()
+		server := exec.Command(p4d, "-r", db, "-p", port, "-L", filepath.Join(base, "server.log"), "-J", filepath.Join(base, "journal"))
+		configureP4Command(server)
+		if err := server.Start(); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("local p4d did not start")
+		t.Cleanup(func() { server.Process.Kill(); server.Wait() })
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := c.run("info"); err == nil {
+				return server
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("local p4d did not start")
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
+	server := startServer()
+	server.Process.Kill()
+	server.Wait()
+	// New databases on p4d 2026.1 apply secure defaults during their first startup.
+	for _, setting := range []string{"security=0", "dm.user.noautocreate=0", "dm.user.setinitialpasswd=1"} {
+		cmd := exec.Command(p4d, "-r", db, "-cset "+setting)
+		configureP4Command(cmd)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("configure fixture: %v: %s", err, out)
+		}
+	}
+	startServer()
 	run := func(args ...string) string {
 		t.Helper()
 		out, err := c.run(args...)
@@ -173,6 +189,119 @@ func TestPerforceIntegration(t *testing.T) {
 		have, err = c.BrowserHaveFiles("//audit/not-synced/*")
 		if err != nil || len(have) != 0 {
 			t.Fatalf("empty have pattern = %v, error %v", have, err)
+		}
+	})
+	t.Run("local operations preserve reserved filenames and wildcard scope", func(t *testing.T) {
+		special := filepath.Join(root, "odd#@%.txt")
+		if _, err := c.Edit(special); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.RevertUnchangedPaths([]string{special}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Edit("//audit/odd%23%40%25.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.RevertFiles([]string{special}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(special, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		write(special, "offline edit\n")
+		modified := time.Now().Add(2 * time.Second)
+		if err := os.Chtimes(special, modified, modified); err != nil {
+			t.Fatal(err)
+		}
+		reconcileOut, err := c.Reconcile(special)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed, err := c.HasChanges(special)
+		if err != nil || !changed {
+			opened, _ := c.OpenedFiles()
+			t.Fatalf("reserved local change = %v, error %v, opened %#v, reconcile %q", changed, err, opened, reconcileOut)
+		}
+		diff, err := c.Diff(special)
+		if err != nil || !strings.Contains(diff, "+offline edit") {
+			t.Fatalf("reserved local diff = %q, error %v", diff, err)
+		}
+		if count, err := c.RestoreReadOnly(special); err != nil || count != 0 {
+			t.Fatalf("opened reserved file restore count = %d, error %v", count, err)
+		}
+		if _, err := c.RevertFiles([]string{special}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(special, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := c.RestoreReadOnly(special); err != nil || count != 1 {
+			t.Fatalf("unopened reserved file restore count = %d, error %v", count, err)
+		}
+		if err := c.DeletePath(special); err != nil {
+			t.Fatal(err)
+		}
+		opened, err := c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].Action != ActionDelete || opened[0].DepotFile != "//depot/odd%23%40%25.txt" {
+			t.Fatalf("reserved local delete = %#v, error %v", opened, err)
+		}
+		if _, err := c.RevertFiles([]string{special}); err != nil {
+			t.Fatal(err)
+		}
+		folder := filepath.Join(root, "folder#@%")
+		direct, nested := filepath.Join(folder, "direct#@%.txt"), filepath.Join(folder, "nested", "nested#@%.txt")
+		write(direct, "reserved direct file\n")
+		write(nested, "reserved nested file\n")
+		if _, err := c.Reconcile(direct); err != nil {
+			t.Fatal(err)
+		}
+		opened, err = c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].Action != ActionAdd || opened[0].DepotFile != "//depot/folder%23%40%25/direct%23%40%25.txt" {
+			t.Fatalf("reserved untracked reconcile = %#v, error %v", opened, err)
+		}
+		if _, err := c.Reconcile(filepath.Join(folder, "...")); err != nil {
+			t.Fatal(err)
+		}
+		opened, err = c.OpenedFiles()
+		if err != nil || len(opened) != 2 {
+			t.Fatalf("recursive reserved reconcile = %#v, error %v", opened, err)
+		}
+		run("submit", "-d", "reserved directory files")
+		if _, err := c.Edit(filepath.Join(folder, "*")); err != nil {
+			t.Fatal(err)
+		}
+		opened, err = c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].DepotFile != "//depot/folder%23%40%25/direct%23%40%25.txt" {
+			t.Fatalf("direct wildcard escaped its scope: %#v, error %v", opened, err)
+		}
+		if err := c.RevertUnchangedPaths([]string{filepath.Join(folder, "*")}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Edit(filepath.Join(folder, "...")); err != nil {
+			t.Fatal(err)
+		}
+		opened, err = c.OpenedFiles()
+		if err != nil || len(opened) != 2 {
+			t.Fatalf("recursive reserved edit = %#v, error %v", opened, err)
+		}
+		if _, err := c.RevertFiles([]string{filepath.Join(folder, "...")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(nested, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		write(nested, "offline nested edit\n")
+		if err := os.Chtimes(nested, modified, modified); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Reconcile(filepath.Join(folder, "...")); err != nil {
+			t.Fatal(err)
+		}
+		if count, err := c.RestoreReadOnly(filepath.Join(folder, "...")); err != nil || count != 1 {
+			t.Fatalf("recursive restore touched opened file: count %d, error %v", count, err)
+		}
+		if _, err := c.RevertFiles([]string{nested}); err != nil {
+			t.Fatal(err)
 		}
 	})
 	t.Run("revert unchanged preserves modifications", func(t *testing.T) {
@@ -294,6 +423,92 @@ func TestPerforceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("canceled submit preserves pending changelist", func(t *testing.T) {
+		cl, err := c.CreateChange("keep description")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run("edit", "-c", cl, a)
+		write(a, "keep canceled edit\n")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := c.Submit(ctx, cl, "canceled description", nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled submit error = %v", err)
+		}
+		descriptions, err := c.PendingDescriptions()
+		if err != nil || descriptions[cl] != "keep description" {
+			t.Fatalf("canceled submit changed description: %#v, error %v", descriptions, err)
+		}
+		files, err := c.OpenedFiles()
+		if err != nil || len(files) != 1 {
+			t.Fatalf("canceled submit opened files = %#v, error %v", files, err)
+		}
+		if err := c.SubmitMarked(ctx, files, "canceled marked submit", nil); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled marked submit error = %v", err)
+		}
+		files, err = c.OpenedFiles()
+		if err != nil || len(files) != 1 || files[0].Change != cl {
+			t.Fatalf("canceled marked submit moved files: %#v, error %v", files, err)
+		}
+		descriptions, err = c.PendingDescriptions()
+		if err != nil || len(descriptions) != 1 {
+			t.Fatalf("canceled marked submit created a change: %#v, error %v", descriptions, err)
+		}
+		run("revert", a)
+		if err := c.DeleteChange(cl); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("submit surfaces server errors", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := c.Submit(ctx, "default", "empty submit", make(chan string, 256)); err == nil || !strings.Contains(err.Error(), "No files to submit") {
+			t.Fatalf("empty submit error = %v", err)
+		}
+	})
+	t.Run("scoped resolve preserves other conflicts", func(t *testing.T) {
+		selectedPath := filepath.Join(root, "odd#@%.txt")
+		if _, err := c.Edit(selectedPath); err != nil {
+			t.Fatal(err)
+		}
+		run("edit", b)
+		write(selectedPath, "remote A\n")
+		write(b, "remote B\n")
+		run("submit", "-d", "resolve head revisions")
+		run("sync", "//depot/odd%23%40%25.txt#1", "//depot/b.txt#1")
+		if _, err := c.Edit(selectedPath); err != nil {
+			t.Fatal(err)
+		}
+		run("edit", b)
+		write(selectedPath, "local A\n")
+		write(b, "local B\n")
+		if _, err := c.SyncPath(selectedPath); err != nil {
+			t.Fatal(err)
+		}
+		run("sync", b)
+		conflicts, err := c.ResolveList("")
+		if err != nil || len(conflicts) != 2 {
+			t.Fatalf("conflicts = %#v, error %v", conflicts, err)
+		}
+		selected, err := c.ResolveList(selectedPath)
+		if err != nil || len(selected) != 1 || filepath.Clean(selected[0].ClientFile) != selectedPath {
+			t.Fatalf("selected conflicts = %#v, error %v", selected, err)
+		}
+		if err := c.AutoResolve(selected[0].ClientFile, []string{"-at"}); err != nil {
+			t.Fatal(err)
+		}
+		remaining, err := c.ResolveList("")
+		if err != nil || len(remaining) != 1 || filepath.Clean(remaining[0].ClientFile) != b {
+			t.Fatalf("unselected resolve was lost: %#v, error %v", remaining, err)
+		}
+		content, err := os.ReadFile(b)
+		if err != nil || string(content) != "local B\n" {
+			t.Fatalf("unselected content = %q, error %v", content, err)
+		}
+		if _, err := c.RevertFiles([]string{selectedPath, b}); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("change detection compares text and binary have revisions", func(t *testing.T) {
 		binary := filepath.Join(root, "asset.bin")
 		write(binary, "\x00binary base\x01")
@@ -344,6 +559,17 @@ func TestPerforceIntegration(t *testing.T) {
 		}
 	})
 	run("revert", a, b)
+	t.Run("failed unshelve preserves entire shelf", func(t *testing.T) {
+		run("delete", a, b)
+		if err := c.UnshelveAndDelete(cl); err == nil {
+			t.Fatal("failed unshelve unexpectedly succeeded")
+		}
+		files, err := c.shelvedFiles(cl)
+		if err != nil || len(files) != 2 {
+			t.Fatalf("failed unshelve lost shelf: files %#v, error %v", files, err)
+		}
+		run("revert", a, b)
+	})
 	run("delete", b)
 	t.Run("partial unshelve preserves entire shelf", func(t *testing.T) {
 		if err := c.UnshelveAndDelete(cl); err == nil {
@@ -352,6 +578,15 @@ func TestPerforceIntegration(t *testing.T) {
 		files, err := c.shelvedFiles(cl)
 		if err != nil || len(files) != 2 {
 			t.Fatalf("shelf was lost: files %#v, error %v", files, err)
+		}
+		opened, err := c.OpenedFiles()
+		if err != nil || len(opened) != 2 {
+			t.Fatalf("partial unshelve opened files = %#v, error %v", opened, err)
+		}
+		for _, file := range opened {
+			if (file.DepotFile == "//depot/a.txt" && file.Action != "edit") || (file.DepotFile == "//depot/b.txt" && file.Action != "delete") {
+				t.Fatalf("partial unshelve changed the blocked file: %#v", opened)
+			}
 		}
 	})
 	run("revert", "//...")
@@ -380,6 +615,30 @@ func TestPerforceIntegration(t *testing.T) {
 	}
 	input(fmt.Sprintf("Client: stream-child\nOwner: audit\nRoot: %s\nStream: //streams/dev\n", childRoot), "client", "-i")
 	c.Workspace, c.Root, c.Stream = "stream-child", childRoot, "//streams/dev"
+	t.Run("invalid stream combinations leave workspace unchanged", func(t *testing.T) {
+		for _, child := range []string{"", "//streams/main", "//streams/missing"} {
+			if _, err := c.MergeStream(child); err == nil {
+				t.Fatalf("invalid promotion from %q succeeded", child)
+			}
+		}
+		for _, target := range []string{"//streams/main", "//streams/missing"} {
+			if _, err := c.CopyStream(target); err == nil {
+				t.Fatalf("invalid merge target %q succeeded", target)
+			}
+		}
+		c.Workspace, c.Root, c.Stream = "audit", root, ""
+		if _, err := c.MergeStream("//streams/dev"); err == nil || !strings.Contains(err.Error(), "not mapped to a stream") {
+			t.Fatalf("promotion from classic workspace error = %v", err)
+		}
+		if _, err := c.CopyStream("//streams/dev"); err == nil || !strings.Contains(err.Error(), "not mapped to a stream") {
+			t.Fatalf("merge into classic workspace error = %v", err)
+		}
+		c.Workspace, c.Root, c.Stream = "stream-child", childRoot, "//streams/dev"
+		opened, err := c.OpenedFiles()
+		if err != nil || len(opened) != 0 {
+			t.Fatalf("invalid stream operations opened files: %#v, error %v", opened, err)
+		}
+	})
 	t.Run("pull and promotion respect target workspace", func(t *testing.T) {
 		if _, err := c.MergeStream("//streams/dev"); err == nil || !strings.Contains(err.Error(), "parent //streams/main") {
 			t.Fatalf("promotion from child workspace was accepted: %v", err)
@@ -420,11 +679,11 @@ func TestPerforceIntegration(t *testing.T) {
 	})
 	t.Run("workspace info remains available before login", func(t *testing.T) {
 		password := "FixturePassword123!"
-		run("passwd", "-P", password)
+		run("configure", "set", "security=3")
+		input(password+"\n"+password+"\n", "passwd")
 		if err := c.Login(password); err != nil {
 			t.Fatal(err)
 		}
-		run("configure", "set", "security=3")
 		run("logout")
 		if c.TicketValid() {
 			t.Fatal("fixture retained its login ticket")
@@ -432,6 +691,74 @@ func TestPerforceIntegration(t *testing.T) {
 		info, err := c.Info()
 		if err != nil || info.Client != c.Workspace || info.User != c.User {
 			t.Fatalf("unauthenticated info %#v, error %v", info, err)
+		}
+	})
+	t.Run("TLS requires explicitly verified fingerprint", func(t *testing.T) {
+		sslDir, sslDB := filepath.Join(base, "ssl"), filepath.Join(base, "ssl-db")
+		for _, dir := range []string{sslDir, sslDB} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		t.Setenv("P4SSLDIR", sslDir)
+		certificate := exec.Command(p4d, "-Gc")
+		configureP4Command(certificate)
+		if out, err := certificate.CombinedOutput(); err != nil {
+			t.Fatalf("generate fixture certificate: %v: %s", err, out)
+		}
+		fingerprintCmd := exec.Command(p4d, "-Gf")
+		configureP4Command(fingerprintCmd)
+		out, err := fingerprintCmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint := strings.TrimSpace(strings.TrimPrefix(string(out), "Fingerprint:"))
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sslPort := "ssl:" + listener.Addr().String()
+		listener.Close()
+		server := exec.Command(p4d, "-r", sslDB, "-p", sslPort, "-L", filepath.Join(base, "ssl-server.log"), "-J", filepath.Join(base, "ssl-journal"))
+		configureP4Command(server)
+		if err := server.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { server.Process.Kill(); server.Wait() })
+		secure := &Client{Port: sslPort, User: "audit", Workspace: "audit", StorePassword: true}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			_, err = secure.Info()
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "fingerprint") {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("TLS fixture did not reject unknown fingerprint: %v", err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		mockCredentials(t, func(_, _ string) (string, error) {
+			t.Fatal("untrusted server requested a stored credential")
+			return "", nil
+		}, func(_, _, _ string) error {
+			t.Fatal("untrusted server stored a credential")
+			return nil
+		})
+		if err := secure.EnsureLoggedIn(func(string) (string, error) {
+			t.Fatal("untrusted server prompted for a credential")
+			return "", nil
+		}); err == nil || !strings.Contains(err.Error(), "cannot verify Perforce server") {
+			t.Fatalf("unknown fingerprint authentication error = %v", err)
+		}
+		if trust, err := os.ReadFile(os.Getenv("P4TRUST")); err == nil && len(trust) != 0 {
+			t.Fatal("unknown fingerprint was accepted automatically")
+		}
+		// The expected fingerprint comes directly from this owned server's certificate.
+		if _, err := secure.run("trust", "-i", fingerprint); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := secure.Info(); err != nil {
+			t.Fatalf("explicitly verified trust was rejected: %v", err)
 		}
 	})
 }
