@@ -4,10 +4,10 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // placeOverlay renders fg on top of bg at position (x, y).
-// Left of fg preserves bg ANSI; right of fg loses ANSI styling (acceptable for overlays).
 func placeOverlay(x, y int, fg, bg string) string {
 	fgLines := strings.Split(fg, "\n")
 	bgLines := strings.Split(bg, "\n")
@@ -56,7 +56,7 @@ func spliceLine(x int, fg, bg string) string {
 		left += strings.Repeat(" ", x-leftW)
 	}
 
-	// Right: bg from column x+fgW, without ANSI (reset before to avoid bleed).
+	// Restore the background's styling after the foreground resets it.
 	right := ansiSkip(bg, x+fgW)
 
 	return left + "\033[0m" + fg + "\033[0m" + right
@@ -67,63 +67,32 @@ func ansiTruncate(s string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}
+	return ansi.Truncate(s, maxWidth, "")
+}
+
+// ansiSkip removes visible columns while retaining the background's ANSI state.
+func ansiSkip(s string, skipCols int) string {
+	if skipCols <= 0 {
+		return s
+	}
 	var buf strings.Builder
 	col := 0
-	runes := []rune(s)
-	for i := 0; i < len(runes); {
-		if runes[i] == '\033' {
-			buf.WriteRune('\033')
-			i++
-			for i < len(runes) {
-				buf.WriteRune(runes[i])
-				end := isAnsiEnd(runes[i])
-				i++
-				if end {
-					break
-				}
-			}
-			continue
-		}
-		if col >= maxWidth {
+	var state byte
+	for len(s) > 0 {
+		seq, width, n, next := ansi.DecodeSequence(s, state, nil)
+		if col >= skipCols && width > 0 {
 			break
 		}
-		buf.WriteRune(runes[i])
-		col++
-		i++
-	}
-	return buf.String()
-}
-
-// ansiSkip skips the first skipCols visible columns and returns the rest (without ANSI codes).
-func ansiSkip(s string, skipCols int) string {
-	plain := ansiStrip(s)
-	runes := []rune(plain)
-	if skipCols >= len(runes) {
-		return ""
-	}
-	return string(runes[skipCols:])
-}
-
-func ansiStrip(s string) string {
-	var buf strings.Builder
-	runes := []rune(s)
-	for i := 0; i < len(runes); {
-		if runes[i] == '\033' {
-			i++
-			for i < len(runes) && !isAnsiEnd(runes[i]) {
-				i++
-			}
-			i++ // skip terminator
-			continue
+		state = next
+		// Replay escape sequences, not combining marks from the removed prefix.
+		if width == 0 && (seq[0] == ansi.ESC || seq[0] >= 0x80 && seq[0] <= 0x9f) {
+			buf.WriteString(seq)
+		} else if width > 0 && col+width > skipCols {
+			// A covered half of a wide character cannot be rendered separately.
+			buf.WriteString(strings.Repeat(" ", col+width-skipCols))
 		}
-		buf.WriteRune(runes[i])
-		i++
+		col += width
+		s = s[n:]
 	}
-	return buf.String()
-}
-
-// isAnsiEnd returns true if r is the final byte of a CSI escape sequence.
-// '[' (0x5B) is excluded because it is the CSI introducer, not a terminator.
-func isAnsiEnd(r rune) bool {
-	return r >= 0x40 && r <= 0x7E && r != '['
+	return buf.String() + s
 }

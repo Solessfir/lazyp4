@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/solessfir/lazyp4/internal/p4"
 	"github.com/solessfir/lazyp4/internal/ui/panes"
@@ -52,6 +53,7 @@ const (
 
 type confirmModal struct {
 	kind          confirmKind
+	cursor        int
 	files         []string // client paths to revert
 	localToDelete []string // local paths to delete after revert (ActionAdd files only)
 	clID          string   // changelist scope for revert or shelf deletion
@@ -486,6 +488,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if a.confirm != nil && keyInput {
 		if m, ok := msg.(tea.KeyMsg); ok {
+			if a.confirm.kind == confirmKindRevert {
+				return a.handleDiscardKey(m)
+			}
 			if a.opRunning {
 				switch m.String() {
 				case "enter", "y", "Y", "l", "d":
@@ -498,18 +503,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c := a.confirm
 				a.confirm = nil
 				switch c.kind {
-				case confirmKindRevert:
-					return a, a.cmdRevert(c.files, c.clID)
 				case confirmKindDeleteShelf:
 					return a, a.cmdDeleteShelf(c.clID)
 				case confirmKindResolve:
 					return a, a.cmdAutoResolve(c.files, c.resolveFlags)
-				}
-			case "d":
-				if a.confirm != nil && len(a.confirm.localToDelete) > 0 {
-					c := a.confirm
-					a.confirm = nil
-					return a, a.cmdRevertAndDeleteLocal(c.files, c.localToDelete, c.clID)
 				}
 			case "esc", "ctrl+c", "n", "N", "h":
 				a.confirm = nil
@@ -2415,6 +2412,9 @@ func (a *App) View() string {
 		return overlayCenter(a.renderCheckoutModal(), base, a.width, a.height)
 	}
 	if a.confirm != nil {
+		if a.confirm.kind == confirmKindRevert {
+			return a.placeDiscardModal(base)
+		}
 		return overlayCenter(a.renderConfirmModal(), base, a.width, a.height)
 	}
 	if a.shelveModal != nil {
@@ -2501,6 +2501,13 @@ func (a *App) renderHotkeys() string {
 	}
 	if a.opRunning {
 		return a.renderProgressBar()
+	}
+	if a.confirm != nil && a.confirm.kind == confirmKindRevert {
+		hint := styleHotkeys.Render("Execute: <enter> | Close/Cancel: <esc>")
+		if activity := a.activityView(); activity != "" {
+			hint = activity + " " + hint
+		}
+		return " " + ansi.Truncate(hint, max(0, a.width-1), "…")
 	}
 
 	type binding struct{ desc, key string }
@@ -2702,6 +2709,9 @@ func (a *App) renderStreamSwitchModal() string {
 }
 
 func (a *App) renderConfirmModal() string {
+	if a.confirm.kind == confirmKindRevert {
+		return a.renderDiscardModal()
+	}
 	var title, desc string
 	switch a.confirm.kind {
 	case confirmKindDeleteShelf:
@@ -2717,22 +2727,8 @@ func (a *App) renderConfirmModal() string {
 			}
 		}
 		desc = styleStatus.Render(fmt.Sprintf("%s\n%d selected conflict(s)", desc, len(a.confirm.files)))
-	default:
-		title = "Discard changes?"
-		if len(a.confirm.files) == 1 {
-			name := a.confirm.files[0]
-			if idx := strings.LastIndexAny(name, "/\\"); idx >= 0 {
-				name = name[idx+1:]
-			}
-			desc = styleStatus.Render(name)
-		} else {
-			desc = styleStatus.Render(fmt.Sprintf("%d files", len(a.confirm.files)))
-		}
 	}
 	hint := "enter - confirm   esc - cancel"
-	if len(a.confirm.localToDelete) > 0 {
-		hint = "enter - revert only   d - revert + delete local   esc - cancel"
-	}
 	content := styleModalTitle.Render(title) +
 		"\n\n" +
 		desc +

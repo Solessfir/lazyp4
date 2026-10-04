@@ -150,6 +150,8 @@ Press `?` inside the app for context-sensitive help.
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
 
+Discard confirmation uses a choice list with a separate description box. Use `j` / `k` or arrow keys to choose, `enter` to execute, and `esc` to cancel. `x` reverts the confirmed files; `d` also deletes local files opened for add when that option is available.
+
 ### Streams pane
 
 | Key | Action |

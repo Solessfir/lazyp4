@@ -42,6 +42,10 @@ func InjectTitle(rendered, num, name string, paneWidth int, focused bool) string
 	return injectTitle(rendered, num, name, paneWidth, focused)
 }
 
+func InjectFooter(rendered, text string, focused bool) string {
+	return injectFooter(rendered, text, focused)
+}
+
 func injectFooter(rendered, text string, focused bool) string {
 	lines := strings.Split(rendered, "\n")
 	if len(lines) == 0 {

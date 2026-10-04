@@ -165,7 +165,7 @@ func TestActivityContinuesThroughModalResizeAndStopsWhenIdle(t *testing.T) {
 	if next == nil || a.activity.spinner.View() == before || !strings.Contains(footer, "Loading") || lipgloss.Width(footer) > 44 {
 		t.Fatalf("resized modal stopped or hid activity: %q", footer)
 	}
-	if a.confirm != confirmation || !strings.Contains(ansi.Strip(a.View()), "Discard changes?") {
+	if a.confirm != confirmation || !strings.Contains(ansi.Strip(a.View()), "Discard changes") {
 		t.Fatal("activity tick or resize dismissed the confirmation")
 	}
 	a.Update(done())
