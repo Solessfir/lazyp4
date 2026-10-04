@@ -27,6 +27,8 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Context-sensitive hotkey bar
 - Animated action status in the footer, with progress counts and cancellation for sync and submit
 
+During actions and background loads, the footer shows the action name with animated dots, such as `Checking out ●∙∙`. The indicator stays active while work is running, including while dialogs are open, and disappears when the work finishes or fails. Sync and submit also show file progress and a `c - cancel` hint when cancellation is available.
+
 ## Requirements
 
 - Go 1.25+
