@@ -72,26 +72,25 @@ var (
 	styleFileDelete = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("1")) // red
 
-	styleFileOther = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("7"))
+	styleFileOther = lipgloss.NewStyle()
 
 	styleDir = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("6")) // cyan
+			Foreground(lipgloss.Color("4")).Bold(true)
 
 	styleMarked = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("10")).Bold(true) // bright green
 
 	styleCursor = lipgloss.NewStyle().
-			Background(lipgloss.Color("8")).
+			Background(selectedLineBgColor).
 			Bold(true)
 
 	styleFocusBorder = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("12"))
+				BorderForeground(lipgloss.Color("4"))
 
 	styleBlurBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("8"))
+			BorderForeground(inactiveBorderColor)
 )
 
 // NewFileListPane creates an empty pane in tree view mode.
@@ -955,8 +954,8 @@ func (p *FileListPane) renderLines(innerW, innerH int) string {
 			}
 		}
 
-		if pos == activeCur && p.focused {
-			line = styleCursor.Width(cursorW).Render(line)
+		if pos == activeCur {
+			line = cursorStyle(p.focused).Width(cursorW).Render(line)
 		}
 		sb.WriteString(line)
 		if pos < end-1 {

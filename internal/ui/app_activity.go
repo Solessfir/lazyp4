@@ -87,5 +87,5 @@ func (a *App) activityView() string {
 	if label == "" {
 		return ""
 	}
-	return styleHotkeyKey.Render(label + " " + a.activity.spinner.View())
+	return styleActivity.Render(label + " " + a.activity.spinner.View())
 }

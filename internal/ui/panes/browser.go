@@ -64,14 +64,14 @@ type browserRow struct {
 }
 
 var (
-	styleBrowserDir       = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true) // cyan
-	styleBrowserWsFile    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))            // white (workspace)
-	styleBrowserDepotFile = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))            // blue (depot)
-	styleBrowserLoading   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleBrowserDir       = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)
+	styleBrowserWsFile    = lipgloss.NewStyle()
+	styleBrowserDepotFile = lipgloss.NewStyle().Foreground(lipgloss.Color("4")) // blue (depot)
+	styleBrowserLoading   = lipgloss.NewStyle().Faint(true)
 	styleOpenMe           = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green — opened by you
 	styleOpenOther        = lipgloss.NewStyle().Foreground(lipgloss.Color("4")) // blue — opened by others
 	styleOpenBoth         = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow — opened by both
-	styleBrowserUntracked = lipgloss.NewStyle().Foreground(lipgloss.Color("8")) // gray — local only, not in depot
+	styleBrowserUntracked = lipgloss.NewStyle().Faint(true)                     // local only, not in depot
 )
 
 // BrowserPane is a lazy-loading tree browser for workspace or depot files.
@@ -966,9 +966,12 @@ func (p *BrowserPane) renderLines(innerW, innerH int) string {
 		row := rows[i]
 		var line string
 		if i == cur && p.focused {
-			line = styleCursor.Width(innerW).Render(p.renderRowPlain(row, innerW))
+			line = cursorStyle(p.focused).Width(innerW).Render(p.renderRowPlain(row, innerW))
 		} else {
 			line = p.renderRow(row, innerW)
+			if i == cur {
+				line = cursorStyle(p.focused).Width(innerW).Render(line)
+			}
 		}
 		sb.WriteString(line)
 		if i < end-1 {

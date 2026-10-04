@@ -14,8 +14,8 @@ const CmdLogHeight = 6 // top border + 4 content lines + bottom border
 const cmdLogMaxEntries = 100
 
 var (
-	styleCmdLogCmd = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
-	styleCmdLogOut = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleCmdLogCmd = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styleCmdLogOut = lipgloss.NewStyle()
 )
 
 // logEntry is one command result with optional detail lines (e.g. file paths).

@@ -6,7 +6,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+const (
+	inactiveBorderColor = lipgloss.Color("#44464f")
+	selectedLineBgColor = lipgloss.Color("#292a2e")
+)
+
 var styleFilterBar = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+
+func cursorStyle(focused bool) lipgloss.Style {
+	if focused {
+		return styleCursor
+	}
+	return styleCursor.UnsetBackground()
+}
 
 func fuzzyMatch(pattern, s string) bool {
 	if pattern == "" {
@@ -40,9 +52,9 @@ func injectFooter(rendered, text string, focused bool) string {
 		return rendered
 	}
 
-	color := lipgloss.Color("8")
+	color := inactiveBorderColor
 	if focused {
-		color = lipgloss.Color("12")
+		color = lipgloss.Color("4")
 	}
 	style := lipgloss.NewStyle().Foreground(color)
 
@@ -68,13 +80,16 @@ func injectDualTitle(rendered, num, firstName, secondName string, firstActive bo
 		paneWidth = measuredW
 	}
 
-	borderColor := lipgloss.Color("8")
+	borderColor := inactiveBorderColor
 	if focused {
-		borderColor = lipgloss.Color("12")
+		borderColor = lipgloss.Color("4")
 	}
 	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
-	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	activeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	dimStyle := lipgloss.NewStyle().Foreground(inactiveBorderColor)
+	if focused {
+		dimStyle = lipgloss.NewStyle()
+	}
 
 	prefix := "───[" + num + "]─ "
 	separator := " / "
@@ -118,9 +133,9 @@ func injectTitle(rendered, num, name string, paneWidth int, focused bool) string
 		paneWidth = measuredW
 	}
 
-	color := lipgloss.Color("8")
+	color := inactiveBorderColor
 	if focused {
-		color = lipgloss.Color("12")
+		color = lipgloss.Color("4")
 	}
 	style := lipgloss.NewStyle().Foreground(color)
 

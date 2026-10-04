@@ -10,19 +10,20 @@ import (
 
 // DiffPane shows colorized p4 diff output for the selected file.
 type DiffPane struct {
-	viewport    viewport.Model
-	raw         string // stored so we can re-truncate on resize
-	focused     bool
-	diffActive  bool // true = Diff is the visible bottom-right pane
-	width       int
-	height      int
+	viewport   viewport.Model
+	raw        string // stored so we can re-truncate on resize
+	focused    bool
+	diffActive bool // true = Diff is the visible bottom-right pane
+	width      int
+	height     int
 }
 
 var (
-	styleDiffAdd = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styleDiffDel = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleDiffCtx = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleDiffHdr = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
+	styleDiffAdd  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	styleDiffDel  = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleDiffCtx  = lipgloss.NewStyle()
+	styleDiffHdr  = lipgloss.NewStyle().Bold(true)
+	styleDiffHunk = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 )
 
 // NewDiffPane creates an empty diff pane.
@@ -112,10 +113,15 @@ func colorize(raw string, maxWidth int) string {
 		}
 		var colored string
 		switch {
-		case strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
+		case strings.HasPrefix(line, "==== ") || strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
 			colored = styleDiffHdr.Render(line)
 		case strings.HasPrefix(line, "@@"):
-			colored = styleDiffCtx.Render(line)
+			if end := strings.Index(line[2:], "@@"); end >= 0 {
+				end += 4
+				colored = styleDiffHunk.Render(line[:end]) + styleDiffCtx.Render(line[end:])
+			} else {
+				colored = styleDiffHunk.Render(line)
+			}
 		case strings.HasPrefix(line, "+"):
 			colored = styleDiffAdd.Render(line)
 		case strings.HasPrefix(line, "-"):

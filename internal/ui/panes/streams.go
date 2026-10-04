@@ -10,10 +10,10 @@ import (
 )
 
 var (
-	styleStreamCurrent = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleStreamNormal  = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	styleStreamTree    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleStreamType    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleStreamCurrent = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleStreamNormal  = lipgloss.NewStyle()
+	styleStreamTree    = lipgloss.NewStyle().Faint(true)
+	styleStreamType    = lipgloss.NewStyle().Faint(true)
 )
 
 // StreamsPane displays the stream hierarchy for the current depot.
@@ -80,7 +80,7 @@ func (p *StreamsPane) SelectedStream() string {
 }
 
 // SetCursor moves the cursor to idx, clamped to valid range.
-func (p *StreamsPane) JumpTop() { p.SetCursor(0) }
+func (p *StreamsPane) JumpTop()    { p.SetCursor(0) }
 func (p *StreamsPane) JumpBottom() { p.SetCursor(len(p.visiblePaths) - 1) }
 
 func (p *StreamsPane) SetCursor(idx int) {
@@ -185,9 +185,12 @@ func (p *StreamsPane) renderNode(node *streamNode, prefix string, isLast bool, d
 		if s.Path == p.current {
 			cursorName = "* " + name
 		}
-		line = styleCursor.Width(p.width - 2).Render(prefix + connector + cursorName + " (" + s.Type + ")")
+		line = cursorStyle(p.focused).Width(p.width - 2).Render(prefix + connector + cursorName + " (" + s.Type + ")")
 	} else {
 		line = styleStreamTree.Render(prefix+connector) + namePart + typeLabel
+		if *idx == p.cursor {
+			line = cursorStyle(p.focused).Width(p.width - 2).Render(line)
+		}
 	}
 	*rows = append(*rows, line)
 	*idx++

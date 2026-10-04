@@ -18,7 +18,7 @@ type LogPane struct {
 	cursor       int
 	entryOffsets []int // viewport line where each entry starts
 	focused      bool
-	diffActive   bool   // false = History is visible (this pane is shown)
+	diffActive   bool // false = History is visible (this pane is shown)
 	width        int
 	height       int
 	innerW       int    // width - 2, used for word-wrap
@@ -28,10 +28,10 @@ type LogPane struct {
 }
 
 var (
-	styleLogCL     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleLogCLNum  = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleLogMeta   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleLogDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	styleLogCL    = lipgloss.NewStyle().Faint(true)
+	styleLogCLNum = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleLogMeta  = lipgloss.NewStyle().Faint(true)
+	styleLogDesc  = lipgloss.NewStyle()
 )
 
 // NewLogPane creates an empty log pane with the given section number and name.
@@ -263,9 +263,13 @@ func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool,
 			marker = "* "
 		}
 		if i == cursor && focused {
-			sb.WriteString(styleCursor.Render(marker + "CL " + e.Change + suffix))
+			sb.WriteString(cursorStyle(focused).Render(marker + "CL " + e.Change + suffix))
 		} else {
-			sb.WriteString(styleLogCLNum.Render(marker) + styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix))
+			row := styleLogCLNum.Render(marker) + styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix)
+			if i == cursor {
+				row = cursorStyle(focused).Render(row)
+			}
+			sb.WriteString(row)
 		}
 		sb.WriteByte('\n')
 		line++

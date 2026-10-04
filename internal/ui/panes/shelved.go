@@ -14,8 +14,8 @@ const ShelvedMaxHeight = 10
 
 var (
 	styleShelvedCL   = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	styleShelvedFile = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleShelvedAct  = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	styleShelvedFile = lipgloss.NewStyle()
+	styleShelvedAct  = lipgloss.NewStyle()
 )
 
 type shelvedRowKind int
@@ -204,8 +204,8 @@ func (p *ShelvedPane) View() string {
 					styleShelvedAct.Render(fmt.Sprintf("%-7s", string(f.Action))) +
 					styleShelvedFile.Render(name)
 			}
-			if i == p.cursor && p.focused {
-				line = styleCursor.Width(innerW).Render(line)
+			if i == p.cursor {
+				line = cursorStyle(p.focused).Width(innerW).Render(line)
 			}
 			lines = append(lines, line)
 		}

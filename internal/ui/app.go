@@ -2426,25 +2426,23 @@ func (a *App) View() string {
 // --- styles ---
 
 var (
-	styleStatus = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	styleStatus   = lipgloss.NewStyle()
+	styleActivity = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 
-	styleHotkeys = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleHotkeys = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 
-	styleHotkeyKey = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("12")).
-			Bold(true)
+	styleHotkeyKey = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 
 	styleModalBox = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("12")).
+			BorderForeground(lipgloss.Color("4")).
 			Padding(1, 2)
 
 	styleModalTitle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("12")).
+			Foreground(lipgloss.Color("4")).
 			Bold(true)
 
-	styleModalHint = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+	styleModalHint = lipgloss.NewStyle()
 )
 
 func (a *App) renderProgressBar() string {
@@ -2457,17 +2455,17 @@ func (a *App) renderProgressBar() string {
 		}
 	}
 	bar := styleHotkeyKey.Render(strings.Repeat("█", filled)) +
-		styleHotkeys.Render(strings.Repeat("░", barWidth-filled))
+		styleStatus.Render(strings.Repeat("░", barWidth-filled))
 
 	var count string
 	if a.opTotal == 0 {
 		if a.opDone > 0 {
-			count = styleHotkeys.Render(fmt.Sprintf("%d files", a.opDone))
+			count = styleStatus.Render(fmt.Sprintf("%d files", a.opDone))
 		} else {
-			count = styleHotkeys.Render("Calculating...")
+			count = styleStatus.Render("Calculating...")
 		}
 	} else {
-		count = styleHotkeys.Render(fmt.Sprintf("%d/%d files", a.opDone, a.opTotal))
+		count = styleStatus.Render(fmt.Sprintf("%d/%d files", a.opDone, a.opTotal))
 	}
 
 	var cancelHint string
@@ -2736,7 +2734,7 @@ func (a *App) renderConfirmModal() string {
 func (a *App) renderHelpModal() string {
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("12"))
+		BorderForeground(lipgloss.Color("4"))
 	rendered := style.Width(a.helpViewport.Width).Height(a.helpViewport.Height).Render(a.helpViewport.View())
 	totalW := lipgloss.Width(rendered)
 	return panes.InjectTitle(rendered, "?", "Keybindings", totalW, true)
@@ -2752,9 +2750,9 @@ func (a *App) fileListHasFiles() bool {
 }
 
 func (a *App) helpContent() string {
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	key := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Bold(true)
-	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	descriptionStyle := lipgloss.NewStyle()
+	key := styleHotkeyKey
+	hdr := styleHotkeys
 
 	type row struct {
 		k, desc string
@@ -2869,7 +2867,7 @@ func (a *App) helpContent() string {
 			}
 			sb.WriteString(hdr.Render(fmt.Sprintf("  ── %s ──", r.k)))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s  %s", key.Render(fmt.Sprintf("%-14s", r.k)), dim.Render(r.desc)))
+			sb.WriteString(fmt.Sprintf("  %s  %s", key.Render(fmt.Sprintf("%-14s", r.k)), descriptionStyle.Render(r.desc)))
 		}
 		if i < len(rows)-1 {
 			sb.WriteByte('\n')

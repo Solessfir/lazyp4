@@ -21,7 +21,7 @@ type ResolvePane struct {
 
 var (
 	styleConflict = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
-	styleResolved = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	styleResolved = lipgloss.NewStyle().Faint(true)
 )
 
 // NewResolvePane creates an empty resolve pane.
@@ -149,8 +149,8 @@ func (p *ResolvePane) renderLines(maxH int) string {
 		c := p.conflicts[i]
 		label := fmt.Sprintf("  %s", shortName(c.ClientFile, p.width-6))
 		var line string
-		if i == p.cursor && p.focused {
-			line = styleCursor.Width(p.width - 4).Render(styleConflict.Render(label))
+		if i == p.cursor {
+			line = cursorStyle(p.focused).Width(p.width - 4).Render(styleConflict.Render(label))
 		} else {
 			line = styleConflict.Render(label)
 		}

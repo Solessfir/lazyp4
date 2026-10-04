@@ -14,19 +14,19 @@ const StatusHeight = 3
 
 var (
 	styleStatusPending = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styleStatusArrow   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleStatusName    = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	styleStatusStream  = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+	styleStatusArrow   = lipgloss.NewStyle().Faint(true)
+	styleStatusName    = lipgloss.NewStyle()
+	styleStatusStream  = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleStatusOffline = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 )
 
 // StatusPane displays workspace info and pending sync count.
 type StatusPane struct {
-	info    p4.WorkspaceInfo
-	pending int  // -1 = not yet fetched
+	info     p4.WorkspaceInfo
+	pending  int  // -1 = not yet fetched
 	fetching bool // fetch in progress
 	offline  bool
-	width   int
+	width    int
 }
 
 func NewStatusPane() *StatusPane {

@@ -29,6 +29,8 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 During actions and background loads, the footer shows the action name with animated dots, such as `Checking out ●∙∙`. The indicator stays active while work is running, including while dialogs are open, and disappears when the work finishes or fails. Sync and submit also show file progress and a `c - cancel` hint when cancellation is available.
 
+The UI follows the terminal's default text and background colors, with ANSI colors for actions and file status. Inactive borders and selected rows use subtle neutral dark shades, following lazygit's styling. Terminal transparency remains controlled by the terminal itself.
+
 ## Requirements
 
 - Go 1.25+
