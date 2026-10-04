@@ -522,6 +522,12 @@ func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 		return nil
 	case tea.KeyMsg:
 		if p.filterMode {
+			if m.Type == tea.KeyRunes && m.Paste {
+				p.filter += string(m.Runes)
+				p.buildFilteredIdxs()
+				p.filterCursor = 0
+				return nil
+			}
 			switch m.String() {
 			case "esc":
 				p.ClearFilter()

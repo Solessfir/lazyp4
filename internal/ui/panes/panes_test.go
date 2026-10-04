@@ -38,6 +38,40 @@ func TestFilteredMarkTargetsVisibleFile(t *testing.T) {
 	}
 }
 
+func TestFiltersAcceptPastedTextLiterally(t *testing.T) {
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("jkbeta"), Paste: true}
+	t.Run("pending", func(t *testing.T) {
+		p := NewFileListPane()
+		p.ToggleMode()
+		p.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+			{DepotFile: "//depot/jkbeta.txt"},
+		}}})
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		p.Update(msg)
+		if p.filter != "jkbeta" || !p.filterMode || len(p.filteredIdxs) != 2 {
+			t.Fatalf("pasted filter was lost or treated as shortcuts: filter=%q, mode=%v, rows=%v", p.filter, p.filterMode, p.filteredIdxs)
+		}
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}, Paste: true})
+		if p.filter != "jkbeta/" || !p.filterMode {
+			t.Fatal("pasted slash exited filter input")
+		}
+	})
+	t.Run("browser", func(t *testing.T) {
+		p := NewBrowserPane()
+		p.SetRoots("//depot", "//workspace")
+		p.LoadSearchIndex([]string{"//workspace/jkbeta.txt"})
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		p.Update(msg)
+		if p.filter != "jkbeta" || !p.filterMode || len(p.filteredRows()) != 1 {
+			t.Fatalf("pasted filter was lost or treated as shortcuts: filter=%q, mode=%v, rows=%d", p.filter, p.filterMode, len(p.filteredRows()))
+		}
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}, Paste: true})
+		if p.filter != "jkbeta/" || !p.filterMode {
+			t.Fatal("pasted slash exited filter input")
+		}
+	})
+}
+
 func TestFilteredRowsRebuildWithoutHiddenSelection(t *testing.T) {
 	for _, mutation := range []string{"refresh", "mode"} {
 		t.Run(mutation, func(t *testing.T) {

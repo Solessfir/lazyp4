@@ -251,9 +251,12 @@ type forceSyncDoneMsg struct {
 	err  error
 }
 
-type reconcileDoneMsg struct {
-	path string
-	err  error
+type fileActionDoneMsg struct {
+	op            string
+	path          string
+	err           error
+	readOnlyCount int
+	readOnlyErr   error
 }
 
 type openFileDoneMsg struct {
@@ -403,6 +406,16 @@ func (a *App) Init() tea.Cmd {
 
 // Update is the main message handler.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyRunes && !key.Paste && len(key.Runes) > 1 {
+		var cmds []tea.Cmd
+		for _, r := range key.Runes {
+			single := key
+			single.Runes = []rune{r}
+			_, cmd := a.Update(single)
+			cmds = append(cmds, cmd)
+		}
+		return a, tea.Batch(cmds...)
+	}
 	if _, mouse := msg.(tea.MouseMsg); mouse && (a.authModal != nil || a.integrateModal != nil || a.streamSwitch != nil || a.checkout != nil || a.confirm != nil || a.moveModal != nil || a.shelveModal != nil || a.modal != nil) {
 		return a, nil
 	}
@@ -580,15 +593,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Loaded %d changelists", len(m.cls))
 			a.cmdLog.Add("p4 opened", fmt.Sprintf("%d changelists", len(m.cls)))
 			a.relayout() // pending height changes
-			if f := a.fileList.SelectedFile(); f != nil && a.active == paneFileList {
-				var cmds []tea.Cmd
-				cmds = append(cmds, a.cmdDiff(f.ClientFile))
-				// Only refresh history from Pending if the user is actively in that pane,
-				// otherwise the browser-driven history load takes priority.
-				if a.historyMode && a.active == paneFileList {
-					cmds = append(cmds, a.cmdFilelog(f.DepotFile))
+			if a.active == paneFileList {
+				cmd := a.cmdSelectionDetails()
+				if a.fileList.HasFiles() || cmd != nil {
+					return a, cmd
 				}
-				return a, tea.Batch(cmds...)
 			}
 			// No pending files and pending pane is focused (or history mode on):
 			// show full stream history so the user has something useful to look at.
@@ -1050,7 +1059,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if m.err == nil {
+			previous := a.browserPane.SelectedPath()
 			a.browserPane.LoadSearchIndex(m.files)
+			if a.active == paneBrowser && a.browserPane.SelectedPath() != previous {
+				return a, a.cmdSelectionDetails()
+			}
 		}
 		return a, nil
 
@@ -1076,14 +1089,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(a.refresh(), a.cmdFetch(), a.cmdFetchCurrentCL())
 
-	case reconcileDoneMsg:
+	case fileActionDoneMsg:
 		logPath := filepath.ToSlash(m.path)
 		if m.err != nil {
-			a.status = "reconcile failed: " + m.err.Error()
-			a.cmdLog.Add("p4 reconcile "+logPath, "error: "+m.err.Error())
+			a.status = m.op + " failed: " + m.err.Error()
+			a.cmdLog.Add("p4 "+m.op+" "+logPath, "error: "+m.err.Error())
 		} else {
-			a.status = "Reconcile complete: " + m.path
-			a.cmdLog.Add("p4 reconcile "+logPath, "done")
+			if m.op == "reconcile" {
+				a.cmdLog.Add("p4 restore-readonly", fmt.Sprintf("path=%s count=%d err=%v", m.path, m.readOnlyCount, m.readOnlyErr))
+			}
+			a.status = m.op + " complete: " + m.path
+			a.cmdLog.Add("p4 "+m.op+" "+logPath, "done")
 		}
 		return a, a.refresh()
 
@@ -1207,6 +1223,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case paneCmdLog:
 				cmd = a.cmdLog.Update(m)
 			}
+			if a.active == paneBrowser || a.active == paneFileList {
+				return a, tea.Batch(cmd, a.cmdSelectionDetails())
+			}
 			return a, cmd
 		}
 		if m.Action == tea.MouseActionPress && m.Button == tea.MouseButtonLeft {
@@ -1278,7 +1297,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case paneFileList:
 			cmd = a.fileList.Update(m)
 		}
-		return a, cmd
+		return a, tea.Batch(cmd, a.cmdSelectionDetails())
 	}
 
 	// Esc with an active (but non-typing) filter clears it and stays in the pane.
@@ -1576,7 +1595,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "left":
 		a.cycleFocusBackward()
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	case "g":
 		a.historyMode = !a.historyMode
 		a.updateFocus()
@@ -1605,7 +1624,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.active = paneDiff
 			a.updateFocus()
 		}
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	case "J":
 		switch a.active {
 		case paneBrowser:
@@ -1655,7 +1674,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "right":
 		a.cycleFocusForward()
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	case "R":
 		a.status = "Checking conflicts..."
 		var resolvePath string
@@ -1714,17 +1733,14 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.active = order[n]
 			a.updateFocus()
 		}
-		if a.historyMode {
-			return a, a.cmdFilelogForSelection()
-		}
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	case "tab":
 		a.cycleFocus()
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	case "esc":
 		a.active = paneBrowser
 		a.updateFocus()
-		return a, nil
+		return a, a.cmdSelectionDetails()
 	}
 
 	var cmd tea.Cmd
@@ -1732,13 +1748,10 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case paneBrowser:
 		switch m.String() {
 		case "l":
-			if loadCmd := a.browserPane.ExpandCurrent(); loadCmd != nil {
-				return a, loadCmd
-			}
-			return a, nil
+			return a, tea.Batch(a.browserPane.ExpandCurrent(), a.cmdSelectionDetails())
 		case "h":
 			a.browserPane.CollapseCurrentOrParent()
-			return a, nil
+			return a, a.cmdSelectionDetails()
 		case "d":
 			if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
 				// Find the opened file matching this depot path.
@@ -1786,60 +1799,22 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		cmd = a.browserPane.Update(m)
-		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
-			if a.historyMode {
-				return a, tea.Batch(cmd, a.cmdFilelog(sel.DepotPath))
-			}
-			return a, tea.Batch(cmd, a.cmdDiff(sel.DepotPath))
-		} else if a.historyMode {
-			if path := a.browserPane.SelectedPath(); path != "" {
-				max := 0
-				if strings.HasSuffix(path, "/...") {
-					max = 100
-				}
-				return a, tea.Batch(cmd, a.cmdFilelogMax(path, max))
-			}
-		}
+		return a, tea.Batch(cmd, a.cmdSelectionDetails())
 	case paneFileList:
 		switch m.String() {
 		case "enter":
 			if f := a.fileList.SelectedFile(); f != nil {
-				return a, func() tea.Msg {
-					return openFileDoneMsg{err: openWithDefault(f.ClientFile)}
-				}
+				return a, a.cmdOpenFile(f.DepotFile)
 			}
 		case "l":
 			a.fileList.ExpandCurrent()
-			return a, nil
+			return a, a.cmdSelectionDetails()
 		case "h":
 			a.fileList.CollapseCurrentOrParent()
-			return a, nil
+			return a, a.cmdSelectionDetails()
 		}
 		cmd = a.fileList.Update(m)
-		if a.historyMode {
-			var histCmd tea.Cmd
-			if a.fileList.SelectedIsHeader() {
-				// CL header → entire stream history, same as root
-				if root := a.browserPane.RootPath(); root != "" {
-					histCmd = a.cmdFilelogMax(depotWildcard(root), 100)
-				}
-			} else if dp := a.fileList.SelectedDepotPath(); dp != "" {
-				if strings.HasSuffix(dp, "/...") {
-					histCmd = a.cmdFilelogMax(dp, 100)
-				} else {
-					histCmd = a.cmdFilelog(dp)
-				}
-			}
-			if histCmd != nil {
-				if f := a.fileList.SelectedFile(); f != nil {
-					return a, tea.Batch(cmd, a.cmdDiff(f.ClientFile), histCmd)
-				}
-				return a, tea.Batch(cmd, histCmd)
-			}
-		}
-		if f := a.fileList.SelectedFile(); f != nil {
-			return a, tea.Batch(cmd, a.cmdDiff(f.ClientFile))
-		}
+		return a, tea.Batch(cmd, a.cmdSelectionDetails())
 	case paneStreams:
 		cmd = a.streamsPane.Update(m)
 		switch m.String() {
@@ -1889,7 +1864,7 @@ func (a *App) handleFilterClear(_ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case paneFileList:
 		a.fileList.ClearFilter()
 	}
-	return a, nil
+	return a, a.cmdSelectionDetails()
 }
 
 func (a *App) handleStreamSwitchKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2976,6 +2951,39 @@ func (a *App) cmdDiff(clientFile string) tea.Cmd {
 	}
 }
 
+func (a *App) cmdSelectionDetails() tea.Cmd {
+	var file string
+	switch a.active {
+	case paneFileList:
+		if f := a.fileList.SelectedFile(); f != nil {
+			file = f.ClientFile
+		}
+	case paneBrowser:
+		if sel := a.browserPane.SelectedEntry(); sel != nil && !sel.IsDir {
+			file = sel.DepotPath
+		}
+	default:
+		return nil
+	}
+	var cmds []tea.Cmd
+	if file != "" && (a.active == paneFileList || !a.historyMode) {
+		cmds = append(cmds, a.cmdDiff(file))
+	} else {
+		a.diffRequest++
+		a.diff.SetContent("")
+	}
+	if a.historyMode {
+		if cmd := a.cmdFilelogForSelection(); cmd != nil {
+			cmds = append(cmds, cmd)
+		} else {
+			a.logRequest++
+			a.logPath = ""
+			a.log.SetEntries(nil)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 // cmdFilelogForSelection returns a filelog command for whatever is currently selected,
 // used when switching panes in history mode.
 func (a *App) cmdFilelogForSelection() tea.Cmd {
@@ -3235,6 +3243,7 @@ func (a *App) cmdRevertAndDeleteLocal(clientFiles, localFiles []string, clID str
 func clientToLocal(root, workspace, clientFile string) string {
 	prefix := "//" + workspace + "/"
 	rel := strings.TrimPrefix(clientFile, prefix)
+	rel = strings.NewReplacer("%40", "@", "%23", "#", "%2A", "*", "%25", "%").Replace(rel)
 	return filepath.Join(root, filepath.FromSlash(rel))
 }
 
@@ -3320,11 +3329,11 @@ func (a *App) cmdReconcile(path string) tea.Cmd {
 	client := *a.client
 	return func() tea.Msg {
 		_, err := client.Reconcile(path)
+		result := fileActionDoneMsg{op: "reconcile", path: path, err: err}
 		if err == nil {
-			count, roErr := client.RestoreReadOnly(path)
-			a.cmdLog.Add("p4 restore-readonly", fmt.Sprintf("path=%s count=%d err=%v", path, count, roErr))
+			result.readOnlyCount, result.readOnlyErr = client.RestoreReadOnly(path)
 		}
-		return reconcileDoneMsg{path: path, err: err}
+		return result
 	}
 }
 
@@ -3332,7 +3341,7 @@ func (a *App) cmdEdit(localPath string) tea.Cmd {
 	client := *a.client
 	return func() tea.Msg {
 		_, err := client.Edit(localPath)
-		return reconcileDoneMsg{path: localPath, err: err}
+		return fileActionDoneMsg{op: "edit", path: localPath, err: err}
 	}
 }
 

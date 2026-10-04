@@ -15,6 +15,19 @@ import (
 	"github.com/solessfir/lazyp4/internal/ui/panes"
 )
 
+func TestFileActionCompletionReportsActualCommand(t *testing.T) {
+	for _, op := range []string{"edit", "reconcile"} {
+		for _, err := range []error{nil, fmt.Errorf("file action failed")} {
+			a := New(&p4.Client{}, 0, "", true)
+			a.cmdLog.SetWidth(120)
+			a.Update(fileActionDoneMsg{op: op, path: "/workspace/file.txt", err: err})
+			if !strings.HasPrefix(a.status, op+" ") || !strings.Contains(a.cmdLog.View(), "p4 "+op+" /workspace/file.txt") {
+				t.Fatalf("%s reported a different operation: status %q, log %q", op, a.status, a.cmdLog.View())
+			}
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	if os.Getenv("LAZYP4_UI_HELPER") == "1" {
 		f, err := os.OpenFile(os.Getenv("LAZYP4_UI_COMMANDS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -29,6 +42,9 @@ func TestMain(m *testing.M) {
 		if strings.Contains(strings.Join(os.Args[1:], " "), "diff") && os.Getenv("LAZYP4_UI_DIFF_ERROR") == "1" {
 			fmt.Fprintln(os.Stderr, "temporary diff failure")
 			os.Exit(1)
+		}
+		if local := os.Getenv("LAZYP4_UI_WHERE_LOCAL"); local != "" && strings.Contains(strings.Join(os.Args[1:], " "), "where") {
+			fmt.Printf("{\"depotFile\":\"//depot/mapped\",\"clientFile\":\"//workspace/mapped\",\"path\":%q}\n", local)
 		}
 		os.Exit(0)
 	}
@@ -210,6 +226,283 @@ func TestObsoleteResponsesCannotReplaceSelection(t *testing.T) {
 	}
 	a.browserEpoch++
 	a.Update(browserSearchDoneMsg{epoch: a.browserEpoch - 1, files: []string{"//depot/obsolete"}})
+}
+
+func TestEmptyPendingSelectionInvalidatesDetails(t *testing.T) {
+	for _, cause := range []string{"filter", "refresh"} {
+		t.Run(cause, func(t *testing.T) {
+			a := New(&p4.Client{}, 0, "", false)
+			a.active = paneFileList
+			a.diff.SetSize(80, 20)
+			a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+				{DepotFile: "//depot/A.txt", ClientFile: "//workspace/A.txt"},
+			}}})
+			a.fileList.SetCursor(1)
+			if cause == "filter" {
+				a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+			}
+			a.cmdDiff("//workspace/A.txt")
+			a.cmdFilelog("//depot/A.txt")
+			diffRequest, logRequest := a.diffRequest, a.logRequest
+			a.diff.SetContent("old diff")
+			a.log.SetEntries([]p4.FilelogEntry{{Change: "old"}})
+			if cause == "filter" {
+				a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+			} else {
+				a.Update(refreshDoneMsg{})
+			}
+			if a.fileList.SelectedFile() != nil {
+				t.Fatal("selection was not removed")
+			}
+			a.Update(diffDoneMsg{request: diffRequest, content: "obsolete diff"})
+			a.Update(logDoneMsg{request: logRequest, entries: []p4.FilelogEntry{{Change: "obsolete"}}})
+			if a.log.SelectedChange() != "" || strings.Contains(a.diff.View(), "diff") {
+				t.Fatal("removed selection retained or accepted obsolete details")
+			}
+		})
+	}
+}
+
+func TestWheelSelectionLoadsCurrentDetails(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a.active = paneFileList
+	a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+		{DepotFile: "//depot/A.txt", ClientFile: "//workspace/A.txt"},
+		{DepotFile: "//depot/B.txt", ClientFile: "//workspace/B.txt"},
+	}}})
+	a.fileList.SetCursor(1)
+	a.cmdFilelog("//depot/A.txt")
+	request := a.logRequest
+	_, cmd := a.Update(tea.MouseMsg{X: 60, Y: 2, Button: tea.MouseButtonWheelDown})
+	if a.fileList.SelectedFile().DepotFile != "//depot/B.txt" {
+		t.Fatal("wheel did not move selection")
+	}
+	if cmd == nil || a.logRequest <= request || a.logPath != "//depot/B.txt" {
+		t.Fatal("wheel selection did not reload current history")
+	}
+}
+
+func TestTreeNavigationRejectsPreviousFileDetails(t *testing.T) {
+	for _, pane := range []activePane{paneBrowser, paneFileList} {
+		t.Run(fmt.Sprint(pane), func(t *testing.T) {
+			a := New(&p4.Client{}, 0, "", true)
+			a.active = pane
+			a.historyMode = false
+			a.diff.SetSize(80, 20)
+			a.browserPane.SetRoots("//depot", "//workspace")
+			a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{
+				{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"},
+			})
+			a.browserPane.NavigateTo("//workspace/a.txt")
+			a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+				{ClientFile: "//workspace/dir/a.txt", DepotFile: "//depot/dir/a.txt"},
+			}}})
+			a.fileList.SetCursor(2)
+			a.cmdDiff("previous file")
+			request := a.diffRequest
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+			if pane == paneFileList && a.fileList.SelectedFile() != nil || pane == paneBrowser && !a.browserPane.SelectedEntry().IsDir {
+				t.Fatal("collapse did not select the parent")
+			}
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+			a.Update(diffDoneMsg{request: request, content: "obsolete diff"})
+			if strings.Contains(a.diff.View(), "obsolete diff") {
+				t.Fatal("parent navigation accepted previous file details")
+			}
+		})
+	}
+}
+
+func TestSelectionPaneFocusRejectsPreviousDiff(t *testing.T) {
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'2'}},
+		{Type: tea.KeyTab},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyLeft},
+		{Type: tea.KeyEsc},
+	} {
+		t.Run(key.String(), func(t *testing.T) {
+			a := New(&p4.Client{}, 0, "", false)
+			a.historyMode = false
+			a.diff.SetSize(80, 20)
+			a.browserPane.SetRoots("//depot", "//workspace")
+			a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{
+				{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"},
+			})
+			a.browserPane.NavigateTo("//workspace/a.txt")
+			a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+				{ClientFile: "//workspace/b.txt", DepotFile: "//depot/b.txt"},
+			}}})
+			a.fileList.SetCursor(1)
+			a.active = paneBrowser
+			if key.Type == tea.KeyLeft || key.Type == tea.KeyEsc {
+				a.active = paneFileList
+			}
+			previous := a.active
+			a.cmdDiff("previous file")
+			request := a.diffRequest
+			a.Update(key)
+			if a.active == previous {
+				t.Fatal("focus did not move between selection panes")
+			}
+			a.Update(diffDoneMsg{request: request, content: "obsolete diff"})
+			if strings.Contains(a.diff.View(), "obsolete diff") {
+				t.Fatal("focus change accepted previous selection's diff")
+			}
+		})
+	}
+}
+
+func TestBrowserSearchSelectionRejectsPreviousHistory(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.browserPane.LoadSearchIndex([]string{"//workspace/beta-old.txt"})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("beta"), Paste: true})
+	request := a.logRequest
+	a.Update(browserSearchDoneMsg{epoch: a.browserEpoch, files: []string{"//workspace/beta-new.txt"}})
+	if a.browserPane.SelectedPath() != "//workspace/beta-new.txt" {
+		t.Fatal("search completion did not change the selected result")
+	}
+	a.Update(logDoneMsg{request: request, entries: []p4.FilelogEntry{{Change: "obsolete"}}})
+	if a.log.SelectedChange() != "" || a.logPath != "//workspace/beta-new.txt" {
+		t.Fatal("search completion retained previous selection's history")
+	}
+}
+
+func TestBrowserHistoryToDiffUsesCurrentSelection(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.diff.SetSize(80, 20)
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{
+		{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"},
+		{ClientPath: "//workspace/b.txt", DepotPath: "//depot/b.txt"},
+	})
+	a.browserPane.NavigateTo("//workspace/a.txt")
+	a.cmdDiff("//depot/a.txt")
+	request := a.diffRequest
+	a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if a.browserPane.SelectedPath() != "//workspace/b.txt" {
+		t.Fatal("history navigation did not select B")
+	}
+	a.Update(diffDoneMsg{request: request, content: "obsolete diff"})
+	if strings.Contains(a.diff.View(), "obsolete diff") {
+		t.Fatal("history navigation accepted previous selection's hidden diff")
+	}
+	request = a.diffRequest
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if a.historyMode || cmd == nil || a.diffRequest <= request {
+		t.Fatal("switching to diff did not request current file details")
+	}
+}
+
+func TestKeyBurstPreservesShortcutsAndModalInput(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+		{DepotFile: "//depot/A.txt", ClientFile: "//workspace/A.txt"},
+	}}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2j sdescription")})
+	if a.active != paneFileList || a.modal == nil || len(a.modal.files) != 1 || a.modal.files[0].DepotFile != "//depot/A.txt" {
+		t.Fatal("key burst did not focus, select, mark and open selected-file submit")
+	}
+	if a.modal.input.Value() != "description" {
+		t.Fatalf("key burst lost modal text: %q", a.modal.input.Value())
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" pasted"), Paste: true})
+	if a.modal.input.Value() != "description pasted" {
+		t.Fatalf("modal lost pasted text: %q", a.modal.input.Value())
+	}
+}
+
+func TestPendingOpenUsesCapturedLocalMapping(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("uses the Linux default opener")
+	}
+	log := fakeP4(t)
+	helper, err := os.ReadFile(filepath.Join(filepath.Dir(log), "p4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(log), "xdg-open"), helper, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	local := filepath.Join(t.TempDir(), "remapped", "a#@%.txt")
+	t.Setenv("LAZYP4_UI_WHERE_LOCAL", local)
+	a := New(&p4.Client{Workspace: "workspace"}, 0, "", false)
+	a.active = paneFileList
+	depot := "//depot/other/a%23%40%25.txt"
+	a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+		{DepotFile: depot, ClientFile: "//workspace/local/a%23%40%25.txt"},
+	}}})
+	a.fileList.SetCursor(1)
+	selected := a.fileList.SelectedFile()
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("pending Enter did not start an open command")
+	}
+	selected.DepotFile, selected.ClientFile = "//depot/replacement.txt", "//workspace/replacement.txt"
+	a.client.Workspace = "replacement"
+	if msg := cmd().(openFileDoneMsg); msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	var commands string
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(log)
+		commands = string(data)
+		if strings.Contains(commands, local) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(commands, "-c workspace where "+depot) || !strings.Contains(commands, local) || strings.Contains(commands, "replacement") {
+		t.Fatalf("open lost the captured selection or local mapping: %s", commands)
+	}
+}
+
+func TestDiscardAddedFileDeletesDecodedLocalPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows filenames cannot contain an asterisk")
+	}
+	log := fakeP4(t)
+	root := t.TempDir()
+	rel := "dir%40%23%25/new%40%23%2540%2A.txt"
+	local := filepath.Join(root, "dir@#%", "new@#%40*.txt")
+	encoded := filepath.Join(root, filepath.FromSlash(rel))
+	for _, file := range []string{local, encoded} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("keep until confirmed"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := New(&p4.Client{Root: root, Workspace: "workspace"}, 0, "", false)
+	a.active = paneFileList
+	clientFile := "//workspace/" + rel
+	a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
+		{DepotFile: "//depot/" + rel, ClientFile: clientFile, Action: p4.ActionAdd},
+	}}})
+	a.fileList.SetCursor(1)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if cmd == nil {
+		t.Fatal("confirmed local deletion did not start")
+	}
+	if _, ok := cmd().(revertDoneMsg); !ok {
+		t.Fatal("added file revert did not finish")
+	}
+	if _, err := os.Stat(local); !os.IsNotExist(err) {
+		t.Fatalf("added file remained at its decoded local path: %v", err)
+	}
+	if _, err := os.Stat(encoded); err != nil {
+		t.Fatalf("unrelated literal encoded path was deleted: %v", err)
+	}
+	commands, err := os.ReadFile(log)
+	if err != nil || !strings.Contains(string(commands), "revert "+clientFile) {
+		t.Fatalf("revert lost encoded Perforce path: %s, %v", commands, err)
+	}
 }
 
 func TestOperationReadsCapturedChannel(t *testing.T) {

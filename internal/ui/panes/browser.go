@@ -740,6 +740,11 @@ func (p *BrowserPane) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		if p.filterMode {
+			if m.Type == tea.KeyRunes && m.Paste {
+				p.filter += string(m.Runes)
+				p.filterCursor = 0
+				return nil
+			}
 			rows := p.filteredRows()
 			switch m.String() {
 			case "esc":
