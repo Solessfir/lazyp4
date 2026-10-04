@@ -491,6 +491,38 @@ func (c *Client) RevertCL(clID string, clientFiles []string) (string, error) {
 	return c.run(args...)
 }
 
+type RevertResult struct {
+	Files           []string
+	AddedLocalFiles []string
+}
+
+// RevertForDiscard returns local paths positively confirmed as reverted.
+func (c *Client) RevertForDiscard(clID string, clientFiles []string) (RevertResult, error) {
+	if len(clientFiles) == 0 {
+		return RevertResult{}, fmt.Errorf("selected files are required to revert")
+	}
+	args := []string{"revert"}
+	if clID != "" {
+		args = append(args, "-c", clID)
+	}
+	args = append(args, fileSpecs(clientFiles)...)
+	out, err := c.runZtag(args...)
+	if err != nil {
+		return RevertResult{}, err
+	}
+	var result RevertResult
+	for _, record := range parseZtag(out) {
+		if record["clientFile"] == "" || record["oldAction"] == "" || (record["action"] != "reverted" && record["action"] != "abandoned") {
+			continue
+		}
+		result.Files = append(result.Files, record["clientFile"])
+		if record["oldAction"] == string(ActionAdd) && record["action"] == "abandoned" {
+			result.AddedLocalFiles = append(result.AddedLocalFiles, record["clientFile"])
+		}
+	}
+	return result, nil
+}
+
 // Reopen moves a file to a different changelist.
 func (c *Client) Reopen(clID, clientFile string) (string, error) {
 	return c.run("reopen", "-c", clID, fileSpec(clientFile))

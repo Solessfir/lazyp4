@@ -364,6 +364,54 @@ func TestPerforceIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("discard identifies only successfully reverted adds", func(t *testing.T) {
+		cl, err := c.CreateChange("discard confirmed adds")
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherCL, err := c.CreateChange("preserve moved add")
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected := filepath.Join(root, "discard space#@%23.txt")
+		moved := filepath.Join(root, "discard moved.txt")
+		write(selected, "discard this add\n")
+		write(moved, "preserve moved content\n")
+		run("add", "-f", "-c", cl, selected, moved)
+		confirmed := []string{"//audit/discard space%23%40%2523.txt", "//audit/discard moved.txt"}
+		if _, err := c.Reopen(otherCL, confirmed[1]); err != nil {
+			t.Fatal(err)
+		}
+		result, err := c.RevertForDiscard(cl, confirmed)
+		if err != nil || len(result.Files) != 1 || result.Files[0] != selected || len(result.AddedLocalFiles) != 1 || result.AddedLocalFiles[0] != selected {
+			t.Fatalf("confirmed discarded adds = %#v, error %v", result, err)
+		}
+		result, err = c.RevertForDiscard(cl, []string{confirmed[1]})
+		if err != nil || len(result.Files) != 0 || len(result.AddedLocalFiles) != 0 {
+			t.Fatalf("skipped add was reported as reverted: %#v, error %v", result, err)
+		}
+		opened, err := c.OpenedFiles()
+		if err != nil || len(opened) != 1 || opened[0].Change != otherCL {
+			t.Fatalf("moved add lost changelist: %#v, error %v", opened, err)
+		}
+		content, err := os.ReadFile(moved)
+		if err != nil || string(content) != "preserve moved content\n" {
+			t.Fatalf("moved add lost content: %q, error %v", content, err)
+		}
+		if _, err := c.RevertFiles([]string{confirmed[1]}); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{cl, otherCL} {
+			if err := c.DeleteChange(id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run("edit", a)
+		result, err = c.RevertForDiscard("", []string{"//audit/a.txt"})
+		if err != nil || len(result.Files) != 1 || result.Files[0] != a || len(result.AddedLocalFiles) != 0 {
+			t.Fatalf("tracked edit revert result = %#v, error %v", result, err)
+		}
+	})
 	t.Run("streamed submit stores default and numbered descriptions", func(t *testing.T) {
 		for _, clID := range []string{"default", "numbered"} {
 			if clID == "numbered" {

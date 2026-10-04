@@ -129,6 +129,172 @@ func TestBrowserLoadNavigationUpdatesHistory(t *testing.T) {
 	}
 }
 
+func TestBrowserModeChangeRejectsPreviousDiff(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.diff.SetSize(80, 20)
+	a.historyMode = false
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"}})
+	a.browserPane.NavigateTo("//workspace/a.txt")
+	a.cmdSelectionDetails()
+	previous := a.diffRequest
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	a.Update(diffDoneMsg{request: previous, content: "obsolete diff"})
+	if strings.Contains(a.diff.View(), "obsolete") {
+		t.Fatal("browser mode change accepted the previous diff")
+	}
+}
+
+func TestClassicDepotRootLoadUsesRootPattern(t *testing.T) {
+	log := fakeP4(t)
+	a := New(&p4.Client{}, 0, "", false)
+	msg := a.cmdBrowserLoad("//", panes.BrowserModeDepot)().(browserLoadedMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := string(data)
+	if !strings.Contains(commands, "dirs //*") || strings.Contains(commands, "files ") || strings.Contains(commands, "opened ") || strings.Contains(commands, "///*") {
+		t.Fatalf("classic root used an invalid depot pattern: %s", commands)
+	}
+}
+
+func TestBrowserNavigationUpdatesDetails(t *testing.T) {
+	for _, history := range []bool{false, true} {
+		t.Run(fmt.Sprint(history), func(t *testing.T) {
+			a := New(&p4.Client{}, 0, "", false)
+			a.diff.SetSize(80, 20)
+			a.historyMode = history
+			a.browserPane.SetRoots("//depot", "//workspace")
+			a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{
+				{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"},
+				{ClientPath: "//workspace/b.txt", DepotPath: "//depot/b.txt"},
+			})
+			a.browserPane.NavigateTo("//workspace/a.txt")
+			a.cmdSelectionDetails()
+			diffID, logID := a.diffRequest, a.logRequest
+			a.Update(browserNavigateMsg{epoch: a.browserEpoch, path: "//workspace/b.txt"})
+			a.Update(diffDoneMsg{request: diffID, content: "obsolete diff"})
+			a.Update(logDoneMsg{request: logID, entries: []p4.FilelogEntry{{Change: "obsolete"}}})
+			if strings.Contains(a.diff.View(), "obsolete") || history && a.log.SelectedChange() == "obsolete" {
+				t.Fatal("mapped browser navigation accepted details for the previous file")
+			}
+		})
+	}
+}
+
+func TestBrowserRefreshRejectsPreviousLoad(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{{ClientPath: "//workspace/current.txt", DepotPath: "//depot/current.txt"}})
+	a.browserPane.NavigateTo("//workspace/current.txt")
+	previous := a.browserEpoch
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	a.Update(browserFastMsg{epoch: previous, parentPath: "//workspace", files: []p4.WorkspaceEntry{{ClientPath: "//workspace/obsolete.txt", DepotPath: "//depot/obsolete.txt"}}})
+	if a.browserPane.SelectedPath() != "//workspace/current.txt" {
+		t.Fatal("old browser response replaced the selected file after refresh")
+	}
+}
+
+func TestPendingRefreshKeepsNewestSnapshot(t *testing.T) {
+	fakeP4(t)
+	a := New(&p4.Client{}, 0, "", false)
+	oldCmd, latestCmd := a.refresh(), a.refresh()
+	old, latest := oldCmd().(refreshDoneMsg), latestCmd().(refreshDoneMsg)
+	latest.cls = []p4.Changelist{{ID: "default", Files: []p4.OpenedFile{{ClientFile: "//workspace/current.txt", DepotFile: "//depot/current.txt"}}}}
+	a.Update(latest)
+	a.fileList.SetCursor(1)
+	a.fileList.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	a.Update(old)
+	if f := a.fileList.SelectedFile(); f == nil || f.DepotFile != "//depot/current.txt" || len(a.fileList.MarkedFiles()) != 1 {
+		t.Fatal("obsolete refresh replaced the current pending list or pruned its mark")
+	}
+	for _, err := range []error{fmt.Errorf("Connect to server failed"), fmt.Errorf("Your session has expired")} {
+		old.err = err
+		a.Update(old)
+		if a.offlineMode || a.authModal != nil {
+			t.Fatal("obsolete refresh changed connection or login state")
+		}
+	}
+}
+
+func TestBrowserMappingDoesNotOverrideUserNavigation(t *testing.T) {
+	a := New(&p4.Client{Workspace: "workspace"}, 0, "", false)
+	a.browserPane.ToggleMode()
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.browserPane.LoadChildren("//depot", nil, []string{"//depot/a.txt"}, nil, nil, nil)
+	a.browserPane.NavigateTo("//depot/a.txt")
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	request := a.browserNavRequest
+	a.Update(browserFastMsg{epoch: a.browserEpoch, parentPath: "//workspace", files: []p4.WorkspaceEntry{
+		{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"},
+		{ClientPath: "//workspace/b.txt", DepotPath: "//depot/b.txt"},
+	}})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j', 'j'}})
+	if a.browserPane.SelectedPath() != "//workspace/b.txt" {
+		t.Fatal("fixture did not select b.txt")
+	}
+	a.Update(browserNavigateMsg{epoch: a.browserEpoch, request: request, path: "//workspace/a.txt"})
+	if a.browserPane.SelectedPath() != "//workspace/b.txt" {
+		t.Fatal("delayed mapping replaced the user's newer selection")
+	}
+}
+
+func TestWorkspaceSyncCanBeCancelledImmediately(t *testing.T) {
+	log := fakeP4(t)
+	marker := filepath.Join(t.TempDir(), "sync-started")
+	t.Setenv("LAZYP4_UI_BLOCK_SYNC_MARKER", marker)
+	a := New(&p4.Client{}, 0, "", false)
+	a.active = paneFileList
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	if cmd == nil || a.opCancel == nil {
+		t.Fatal("workspace sync starts without cancellation")
+	}
+	start := time.Now()
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			a.opCancel()
+			t.Fatal("native sync did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	deadline := time.After(5 * time.Second)
+	for {
+		result := make(chan tea.Msg, 1)
+		go func() { result <- cmd() }()
+		select {
+		case msg := <-result:
+			if end, ok := msg.(opEndMsg); ok {
+				if end.err != context.Canceled {
+					t.Fatalf("sync ended with %v", end.err)
+				}
+				a.Update(end)
+				if a.opRunning || !strings.Contains(a.status, "cancelled") {
+					t.Fatal("sync stayed busy after cancellation")
+				}
+				data, _ := os.ReadFile(log)
+				if strings.Contains(string(data), "changes") {
+					t.Fatal("sync ran the unused non-cancellable preflight")
+				}
+				return
+			}
+			_, cmd = a.Update(msg)
+			if cmd == nil {
+				t.Fatalf("sync stopped reading before completion: %T", msg)
+			}
+		case <-deadline:
+			t.Fatal("sync did not finish after cancellation")
+		}
+	}
+}
+
 func TestFileActionCompletionReportsActualCommand(t *testing.T) {
 	for _, op := range []string{"edit", "reconcile"} {
 		for _, err := range []error{nil, fmt.Errorf("file action failed")} {
@@ -150,6 +316,15 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Fprintln(f, strings.Join(os.Args[1:], " "))
 		f.Close()
+		if marker := os.Getenv("LAZYP4_UI_BLOCK_SYNC_MARKER"); marker != "" && strings.Contains(strings.Join(os.Args[1:], " "), "sync") {
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				panic(err)
+			}
+			time.Sleep(time.Minute)
+		}
+		if strings.Contains(strings.Join(os.Args[1:], " "), "revert") {
+			fmt.Print(os.Getenv("LAZYP4_UI_REVERT_OUTPUT"))
+		}
 		if strings.Contains(strings.Join(os.Args[1:], " "), "change -i") {
 			fmt.Println("Change 12 created.")
 		}
@@ -595,6 +770,7 @@ func TestDiscardAddedFileDeletesDecodedLocalPath(t *testing.T) {
 	a := New(&p4.Client{Root: root, Workspace: "workspace"}, 0, "", false)
 	a.active = paneFileList
 	clientFile := "//workspace/" + rel
+	t.Setenv("LAZYP4_UI_REVERT_OUTPUT", fmt.Sprintf("{\"oldAction\":\"add\",\"action\":\"abandoned\",\"clientFile\":%q}\n", local))
 	a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{
 		{DepotFile: "//depot/" + rel, ClientFile: clientFile, Action: p4.ActionAdd},
 	}}})

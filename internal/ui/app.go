@@ -137,8 +137,9 @@ func newSubmitModal(clID string, files []p4.OpenedFile) *submitModal {
 // --- tea messages ---
 
 type refreshDoneMsg struct {
-	cls []p4.Changelist
-	err error
+	request uint64
+	cls     []p4.Changelist
+	err     error
 }
 
 type diffDoneMsg struct {
@@ -202,8 +203,9 @@ type opDoneMsg struct {
 }
 
 type infoFetchedMsg struct {
-	info p4.WorkspaceInfo
-	err  error
+	request uint64
+	info    p4.WorkspaceInfo
+	err     error
 }
 
 type currentCLFetchedMsg struct{ cl string }
@@ -239,12 +241,6 @@ type unshelveDeleteDoneMsg struct {
 type deleteShelfDoneMsg struct {
 	clID string
 	err  error
-}
-
-type syncDryDoneMsg struct {
-	id    uint64
-	total int
-	err   error
 }
 
 type forceSyncDoneMsg struct {
@@ -293,9 +289,10 @@ type opLineMsg struct {
 }
 
 type browserNavigateMsg struct {
-	epoch uint64
-	path  string
-	err   error
+	epoch   uint64
+	request uint64
+	path    string
+	err     error
 }
 type opEndMsg struct {
 	id  uint64
@@ -335,21 +332,24 @@ type App struct {
 	resolve     *panes.ResolvePane
 	cmdLog      *panes.CmdLogPane
 
-	streams          []p4.StreamInfo
-	showStreams      bool   // true when stream depot with >1 stream
-	isStreamDepot    bool   // false = classic depot (no streams)
-	browserNavTarget string // pending nav-to path after filter clear
-	browserEpoch     uint64
-	historyMode      bool   // true = show History pane at bottom-right, false = Diff
-	logPath          string // last path loaded into the history pane
-	logMax           int    // last max passed to cmdFilelogMax (0 = unlimited)
-	diffRequest      uint64
-	logRequest       uint64
-	resolveRequest   uint64
-	resolvePath      string
-	syncPath         string // depot path used for the current/last sync
-	pinnedCL         string // non-empty when synced to a specific CL instead of HEAD
-	offlineMode      bool   // true = p4 server unreachable
+	streams           []p4.StreamInfo
+	showStreams       bool   // true when stream depot with >1 stream
+	isStreamDepot     bool   // false = classic depot (no streams)
+	browserNavTarget  string // pending nav-to path after filter clear
+	browserEpoch      uint64
+	browserNavRequest uint64
+	historyMode       bool   // true = show History pane at bottom-right, false = Diff
+	logPath           string // last path loaded into the history pane
+	logMax            int    // last max passed to cmdFilelogMax (0 = unlimited)
+	diffRequest       uint64
+	refreshRequest    uint64
+	infoRequest       uint64
+	logRequest        uint64
+	resolveRequest    uint64
+	resolvePath       string
+	syncPath          string // depot path used for the current/last sync
+	pinnedCL          string // non-empty when synced to a specific CL instead of HEAD
+	offlineMode       bool   // true = p4 server unreachable
 
 	width  int
 	height int
@@ -574,7 +574,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case refreshDoneMsg:
+		if m.request != a.refreshRequest {
+			return a, nil
+		}
 		if m.err != nil {
+			if p4.IsAuthError(m.err) {
+				return a.Update(authRequiredMsg{})
+			}
 			if p4.IsConnectionError(m.err) {
 				a.setOffline(true)
 			} else {
@@ -738,24 +744,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.cmdSubmitMarkedStart(m.files, m.description)
 
-	case syncDryDoneMsg:
-		if m.id != a.opID {
-			return a, nil
-		}
-		if m.err != nil {
-			a.opRunning = false
-			a.status = "sync dry-run failed: " + m.err.Error()
-			return a, nil
-		}
-		a.opTotal = 0 // CL count from dry-run != file count; leave unknown
-		a.opDone = 0
-		client := *a.client
-		return a, a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
-			err := client.SyncStreaming(ctx, ch)
-			ch <- opErrLine(err)
-			close(ch)
-		})
-
 	case opLineMsg:
 		if m.id != a.opID {
 			return a, nil
@@ -894,11 +882,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case infoFetchedMsg:
+		if m.request != a.infoRequest {
+			return a, nil
+		}
+		if p4.IsAuthError(m.err) {
+			return a.Update(authRequiredMsg{})
+		}
 		if m.err != nil && p4.IsConnectionError(m.err) {
 			a.setOffline(true)
 			return a, nil
 		}
 		if m.err == nil {
+			workspace := a.client.Workspace
+			if workspace == "" {
+				workspace = m.info.Client
+			}
+			rootsChanged := a.browserPane.RootPath() == "" || a.client.Workspace != workspace || a.client.Root != m.info.Root || a.client.Stream != m.info.Stream
 			a.client.Root = m.info.Root
 			a.client.Stream = m.info.Stream
 			// Fill in any connection fields that p4 resolved itself (e.g. via
@@ -913,6 +912,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.client.Port = m.info.ServerAddr
 			}
 			a.statusPane.SetInfo(m.info)
+			cmds := []tea.Cmd{a.cmdFetchCurrentCL()}
+			a.isStreamDepot = m.info.Stream != ""
+			if a.isStreamDepot {
+				cmds = append(cmds, a.cmdStreams(m.info.Stream))
+			}
+			if !rootsChanged {
+				if len(a.browserPane.LoadedDirPaths()) == 0 {
+					root := a.browserPane.RootPath()
+					cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
+					if a.isStreamDepot || a.browserPane.Mode() == panes.BrowserModeWorkspace {
+						cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
+					}
+				}
+				return a, tea.Batch(cmds...)
+			}
 			a.browserEpoch++
 			a.browserNavTarget = ""
 			depotRoot := m.info.Stream
@@ -920,28 +934,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				depotRoot = "//"
 			}
 			a.browserPane.SetRoots(depotRoot, "//"+a.client.Workspace)
-			var cmds []tea.Cmd
-			cmds = append(cmds, a.cmdFetchCurrentCL())
-			if m.info.Stream != "" {
-				a.isStreamDepot = true
-				cmds = append(cmds, a.cmdStreams(m.info.Stream))
-				root := a.browserPane.RootPath()
-				cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
+			root := a.browserPane.RootPath()
+			cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
+			// Skip indexing entire classic depots, which could be enormous.
+			if a.isStreamDepot || a.browserPane.Mode() == panes.BrowserModeWorkspace {
 				cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
+			}
+			if a.active != paneFileList || !a.fileList.HasFiles() {
+				a.diffRequest++
+				a.diff.SetContent("")
 				if a.historyMode {
-					cmds = append(cmds, a.cmdFilelogMax(m.info.Stream+"/...", 100))
-				}
-			} else {
-				// Classic depot: no streams, use // as browser root.
-				// Skip search index (//... could be enormous).
-				a.isStreamDepot = false
-				root := a.browserPane.RootPath()
-				cmds = append(cmds, a.cmdBrowserLoad(root, a.browserPane.Mode()))
-				if a.browserPane.Mode() == panes.BrowserModeWorkspace {
-					cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
-				}
-				if a.historyMode {
-					cmds = append(cmds, a.cmdFilelogMax("//...", 100))
+					cmds = append(cmds, a.cmdFilelogMax(depotWildcard(depotRoot), 100))
+				} else {
+					a.logRequest++
+					a.logPath = ""
+					a.log.SetEntries(nil)
 				}
 			}
 			if len(cmds) > 0 {
@@ -1051,16 +1058,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case browserNavigateMsg:
-		if m.epoch != a.browserEpoch || m.err != nil {
+		if m.epoch != a.browserEpoch || m.request != a.browserNavRequest || m.err != nil {
 			return a, nil
 		}
+		previous := a.browserPane.SelectedPath()
 		a.browserNavTarget = m.path
-		if a.browserPane.NavigateTo(m.path) {
-			a.browserNavTarget = ""
-		} else if next := a.browserPane.FirstUnloadedAncestor(m.path); next != "" {
-			return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
-		}
-		return a, nil
+		return a, a.cmdBrowserLoadFollowup(previous, "", a.browserPane.Mode())
 
 	case forceSyncDoneMsg:
 		if m.err != nil {
@@ -1139,7 +1142,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.status = "Logged in"
 			a.cmdLog.Add("p4 login", "done")
-			return a, a.refresh()
+			return a, tea.Batch(a.refresh(), a.cmdInfo(), a.cmdFetch(), a.cmdLoadShelved())
 		}
 		return a, nil
 
@@ -1192,6 +1195,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			switch a.active {
 			case paneBrowser:
+				a.cancelBrowserNavigation()
 				cmd = a.browserPane.Update(m)
 			case paneFileList:
 				cmd = a.fileList.Update(m)
@@ -1270,6 +1274,9 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// global shortcuts (s, d, b, …) don't fire while typing a search term.
 	// Esc is intercepted here so async nav loading can be triggered.
 	if a.activePaneInFilterMode() {
+		if a.active == paneBrowser {
+			a.cancelBrowserNavigation()
+		}
 		if m.String() == "esc" {
 			return a.handleFilterClear(m)
 		}
@@ -1358,9 +1365,14 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "r":
 		a.status = "Refreshing..."
+		a.browserEpoch++
+		a.cancelBrowserNavigation()
 		cmds := []tea.Cmd{a.refresh()}
 		for _, path := range a.browserPane.LoadedDirPaths() {
 			cmds = append(cmds, a.cmdBrowserLoad(path, a.browserPane.Mode()))
+		}
+		if root := a.browserPane.RootPath(); root != "" && (a.browserPane.Mode() == panes.BrowserModeWorkspace || a.isStreamDepot) {
+			cmds = append(cmds, a.cmdBrowserSearch(root, a.browserPane.Mode()))
 		}
 		return a, tea.Batch(cmds...)
 	case "t":
@@ -1373,20 +1385,22 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "b":
 		sel := a.browserPane.SelectedEntry()
 		a.browserEpoch++
-		a.browserNavTarget = ""
+		a.cancelBrowserNavigation()
 		a.browserPane.ToggleMode()
 		if path := a.browserPane.RootPath(); path != "" {
 			cmds := []tea.Cmd{
 				a.cmdBrowserLoad(path, a.browserPane.Mode()),
 				a.cmdBrowserSearch(path, a.browserPane.Mode()),
+				a.cmdSelectionDetails(),
 			}
 			if sel != nil && !sel.IsDir {
 				epoch := a.browserEpoch
+				request := a.browserNavRequest
 				client := *a.client
 				if a.browserPane.Mode() == panes.BrowserModeWorkspace {
 					cmds = append(cmds, func() tea.Msg {
 						path, err := client.WhereClient(sel.DepotPath)
-						return browserNavigateMsg{epoch: epoch, path: path, err: err}
+						return browserNavigateMsg{epoch: epoch, request: request, path: path, err: err}
 					})
 				} else if !strings.HasPrefix(sel.DepotPath, "//"+client.Workspace+"/") {
 					a.browserNavTarget = sel.DepotPath
@@ -1542,7 +1556,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			syncTarget = a.client.Stream + "/..."
 		}
 		a.status = "Syncing " + syncTarget + "..."
-		return a, a.cmdSyncDryRun()
+		return a, a.cmdSyncStart()
 	case "P":
 		if a.active != paneBrowser {
 			return a, nil
@@ -1635,6 +1649,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "H":
 		switch a.active {
 		case paneBrowser:
+			a.cancelBrowserNavigation()
 			a.browserPane.CollapseAll()
 		case paneFileList:
 			a.fileList.CollapseAll()
@@ -1643,6 +1658,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "L":
 		switch a.active {
 		case paneBrowser:
+			a.cancelBrowserNavigation()
 			toLoad := a.browserPane.ExpandSelected1Level()
 			if len(toLoad) > 0 {
 				cmds := make([]tea.Cmd, len(toLoad))
@@ -1729,6 +1745,7 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch a.active {
 	case paneBrowser:
+		a.cancelBrowserNavigation()
 		switch m.String() {
 		case "l":
 			return a, tea.Batch(a.browserPane.ExpandCurrent(), a.cmdSelectionDetails())
@@ -1838,10 +1855,11 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (a *App) handleFilterClear(_ tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.active {
 	case paneBrowser:
+		a.cancelBrowserNavigation()
 		if navTarget := a.browserPane.ClearFilter(); navTarget != "" {
 			a.browserNavTarget = navTarget
 			if next := a.browserPane.FirstUnloadedAncestor(navTarget); next != "" {
-				return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
+				return a, tea.Batch(a.cmdBrowserLoad(next, a.browserPane.Mode()), a.cmdSelectionDetails())
 			}
 		}
 	case paneFileList:
@@ -2058,6 +2076,7 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		case y >= browserTop && y < browserBottom:
 			a.active = paneBrowser
 			a.updateFocus()
+			a.cancelBrowserNavigation()
 			if contentY := y - browserTop - 1; contentY >= 0 {
 				a.browserPane.SetCursor(a.browserPane.ScrollOffset() + contentY)
 			}
@@ -2778,17 +2797,16 @@ func (a *App) helpContent() string {
 // --- async commands ---
 
 func (a *App) cmdInfo() tea.Cmd {
+	a.infoRequest++
+	request := a.infoRequest
 	client := *a.client
 	return func() tea.Msg {
 		// Auto-login from keychain before fetching info.
 		if err := client.EnsureLoggedIn(nil); err != nil && p4.IsAuthError(err) {
-			return authRequiredMsg{}
+			return infoFetchedMsg{request: request, err: err}
 		}
 		info, err := client.Info()
-		if err != nil && p4.IsAuthError(err) {
-			return authRequiredMsg{}
-		}
-		return infoFetchedMsg{info: info, err: err}
+		return infoFetchedMsg{request: request, info: info, err: err}
 	}
 }
 
@@ -2841,14 +2859,13 @@ func (a *App) cmdFetch() tea.Cmd {
 }
 
 func (a *App) refresh() tea.Cmd {
+	a.refreshRequest++
+	request := a.refreshRequest
 	client := *a.client
 	return func() tea.Msg {
 		files, err := client.OpenedFiles()
 		if err != nil {
-			if p4.IsAuthError(err) {
-				return authRequiredMsg{}
-			}
-			return refreshDoneMsg{err: err}
+			return refreshDoneMsg{request: request, err: err}
 		}
 		// Mark files that need resolve.
 		if conflicts, err := client.ResolveList(""); err == nil && len(conflicts) > 0 {
@@ -2881,10 +2898,7 @@ func (a *App) refresh() tea.Cmd {
 		// Mark edit files that have actual local changes vs the have revision.
 		diffStatus, err := client.FilesDiffStatus()
 		if err != nil {
-			if p4.IsAuthError(err) {
-				return authRequiredMsg{}
-			}
-			return refreshDoneMsg{err: err}
+			return refreshDoneMsg{request: request, err: err}
 		}
 		for i := range files {
 			if files[i].Action == p4.ActionEdit {
@@ -2899,7 +2913,7 @@ func (a *App) refresh() tea.Cmd {
 				}
 			}
 		}
-		return refreshDoneMsg{cls: cls}
+		return refreshDoneMsg{request: request, cls: cls}
 	}
 }
 
@@ -2945,6 +2959,11 @@ func (a *App) cmdSelectionDetails() tea.Cmd {
 		}
 	}
 	return tea.Batch(cmds...)
+}
+
+func (a *App) cancelBrowserNavigation() {
+	a.browserNavRequest++
+	a.browserNavTarget = ""
 }
 
 func (a *App) cmdBrowserLoadFollowup(previousPath, autoExpand string, mode panes.BrowserMode) tea.Cmd {
@@ -3044,7 +3063,7 @@ func (a *App) cmdBrowserSearch(root string, mode panes.BrowserMode) tea.Cmd {
 func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 	epoch := a.browserEpoch
 	client := *a.client
-	wildcard := path + "/*"
+	wildcard := strings.TrimSuffix(path, "/") + "/*"
 	if mode == panes.BrowserModeWorkspace {
 		return tea.Batch(
 			func() tea.Msg {
@@ -3073,10 +3092,13 @@ func (a *App) cmdBrowserLoad(path string, mode panes.BrowserMode) tea.Cmd {
 		var othersOpen map[string]bool
 		var dirsErr, filesErr error
 		var wg sync.WaitGroup
-		wg.Add(3)
-		go func() { defer wg.Done(); othersOpen, _ = client.OpenedByOthers(wildcard) }()
+		wg.Add(1)
 		go func() { defer wg.Done(); dirs, dirsErr = client.BrowserDirs(wildcard) }()
-		go func() { defer wg.Done(); files, filesErr = client.BrowserDepotFiles(wildcard) }()
+		if path != "//" {
+			wg.Add(2)
+			go func() { defer wg.Done(); othersOpen, _ = client.OpenedByOthers(wildcard) }()
+			go func() { defer wg.Done(); files, filesErr = client.BrowserDepotFiles(wildcard) }()
+		}
 		wg.Wait()
 		if dirsErr != nil {
 			return browserLoadedMsg{epoch: epoch, parentPath: path, err: dirsErr}
@@ -3201,22 +3223,23 @@ func (a *App) cmdRevertAndDeleteLocal(clientFiles, localFiles []string, clID str
 	client := *a.client
 	sourceCLs := a.sourceCLsForClientFiles(clientFiles)
 	return func() tea.Msg {
-		var err error
-		if clID != "" {
-			_, err = client.RevertCL(clID, clientFiles)
-		} else {
-			_, err = client.RevertFiles(clientFiles)
-		}
+		result, err := client.RevertForDiscard(clID, clientFiles)
 		if err != nil {
 			return opDoneMsg{"revert failed: " + err.Error(), "p4 revert", "error: " + err.Error()}
 		}
 		for _, cl := range sourceCLs {
 			_ = client.DeleteChange(cl)
 		}
-		for _, local := range localFiles {
-			_ = os.Remove(local)
+		confirmed := make(map[string]bool, len(result.AddedLocalFiles))
+		for _, local := range result.AddedLocalFiles {
+			confirmed[filepath.Clean(local)] = true
 		}
-		return revertDoneMsg{files: clientFiles}
+		for _, local := range localFiles {
+			if confirmed[filepath.Clean(local)] {
+				_ = os.Remove(local)
+			}
+		}
+		return revertDoneMsg{files: result.Files}
 	}
 }
 
@@ -3460,13 +3483,12 @@ func (a *App) cmdShelveForCheckout(co *checkoutModal) tea.Cmd {
 	}
 }
 
-func (a *App) cmdSyncDryRun() tea.Cmd {
+func (a *App) cmdSyncStart() tea.Cmd {
 	if a.opRunning {
 		return nil
 	}
 	a.opRunning = true
 	a.opID++
-	id := a.opID
 	client := *a.client
 	a.opName = "Syncing"
 	a.opTotal = 0
@@ -3476,10 +3498,11 @@ func (a *App) cmdSyncDryRun() tea.Cmd {
 	} else {
 		a.syncPath = "//..."
 	}
-	return func() tea.Msg {
-		count, err := client.SyncDryRun()
-		return syncDryDoneMsg{id: id, total: count, err: err}
-	}
+	return a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
+		err := client.SyncStreaming(ctx, ch)
+		ch <- opErrLine(err)
+		close(ch)
+	})
 }
 
 // cmdOpStart launches a generic streaming operation goroutine and returns the first read cmd.
