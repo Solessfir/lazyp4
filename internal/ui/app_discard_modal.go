@@ -65,7 +65,7 @@ func (a *App) renderDiscardModal() string {
 	keys = append(keys, " ")
 	labels = append(labels, "Cancel")
 	cursor := max(0, min(c.cursor, len(labels)-1))
-	width := max(3, min(a.width-2, max(80, min(4*a.width/7, 90))))
+	width := a.popupWidth(90)
 	innerW := width - 2
 	rows := make([]string, len(labels))
 	for i, label := range labels {

@@ -476,6 +476,10 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.checkout = nil
 				a.status = "Cancelled"
 			case "enter", "y", "Y", "l":
+				if a.opRunning {
+					a.status = a.opName + " in progress"
+					return a, nil
+				}
 				if co.hasFiles {
 					return a, a.cmdShelveForCheckout(co)
 				}
@@ -1938,6 +1942,10 @@ func (a *App) handleIntegrateKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if !im.isClassic {
 		// Stream depot: m = pull from parent, c = push to parent.
+		if a.opRunning && (m.String() == "m" || m.String() == "c") {
+			a.status = a.opName + " in progress"
+			return a, nil
+		}
 		switch m.String() {
 		case "m":
 			a.integrateModal = nil
@@ -1961,6 +1969,10 @@ func (a *App) handleIntegrateKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, textinput.Blink
 		}
 		// step 1 — submit
+		if a.opRunning {
+			a.status = a.opName + " in progress"
+			return a, nil
+		}
 		src := im.sourceInput.Value()
 		dst := im.targetInput.Value()
 		if dst == "" {
@@ -2091,15 +2103,14 @@ func (a *App) execShelveWithDesc() tea.Cmd {
 }
 
 func (a *App) renderShelveModal() string {
-	content := styleModalTitle.Render(fmt.Sprintf("Shelve %d file(s)", len(a.shelveModal.files))) +
-		"\n\n" +
-		a.shelveModal.input.View() +
-		"\n\n" +
-		styleModalHint.Render("enter - confirm   esc - cancel")
-	return styleModalBox.Render(content)
+	return a.renderModalBox(fmt.Sprintf("Shelve %d file(s)", len(a.shelveModal.files)), a.modalInputView(a.shelveModal.input))
 }
 
 func (a *App) execSubmit() tea.Cmd {
+	if a.opRunning {
+		a.status = a.opName + " in progress"
+		return nil
+	}
 	m := a.modal
 	a.modal = nil
 	desc := strings.TrimSpace(m.input.Value())
@@ -2359,16 +2370,14 @@ func (a *App) relayout() {
 	a.resolve.SetSize(rightW, diffH)
 	a.cmdLog.SetWidth(a.width)
 
-	helpW := a.width*3/5 - 2
-	helpH := a.height*3/5 - 2
-	if helpW < 20 {
-		helpW = 20
-	}
-	if helpH < 5 {
-		helpH = 5
-	}
+	helpW := max(1, a.popupWidth(90)-2)
+	helpH := max(1, min(a.height-3, a.height*3/4-2))
 	a.helpViewport.Width = helpW
 	a.helpViewport.Height = helpH
+	if a.showHelp {
+		a.helpViewport.SetContent(a.helpContent())
+		a.helpViewport.SetYOffset(a.helpViewport.YOffset)
+	}
 }
 
 // View renders the full TUI.
@@ -2397,7 +2406,13 @@ func (a *App) View() string {
 	rightSide := lipgloss.JoinVertical(lipgloss.Left, a.fileList.View(), rightBottom)
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftSide, rightSide)
-	base := lipgloss.JoinVertical(lipgloss.Left, body, a.cmdLog.View(), a.renderHotkeys())
+	content := lipgloss.JoinVertical(lipgloss.Left, body, a.cmdLog.View())
+	lines := strings.Split(content, "\n")
+	// Pane minimum heights may exceed a short terminal; keep the footer and overlays visible.
+	if len(lines) > max(0, a.height-1) {
+		content = strings.Join(lines[:max(0, a.height-1)], "\n")
+	}
+	base := lipgloss.JoinVertical(lipgloss.Left, content, a.renderHotkeys())
 
 	if a.authModal != nil {
 		return overlayCenter(a.renderAuthModal(), base, a.width, a.height)
@@ -2442,17 +2457,6 @@ var (
 	styleHotkeys = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 
 	styleHotkeyKey = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-
-	styleModalBox = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("4")).
-			Padding(1, 2)
-
-	styleModalTitle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("4")).
-			Bold(true)
-
-	styleModalHint = lipgloss.NewStyle()
 )
 
 func (a *App) renderProgressBar() string {
@@ -2499,15 +2503,18 @@ func (a *App) renderHotkeys() string {
 			styleHotkeys.Render(" - select text in terminal, then press any key to restore mouse")
 		return " " + hint
 	}
-	if a.opRunning {
-		return a.renderProgressBar()
-	}
-	if a.confirm != nil && a.confirm.kind == confirmKindRevert {
-		hint := styleHotkeys.Render("Execute: <enter> | Close/Cancel: <esc>")
+	if modalHint := a.modalHotkeys(); modalHint != "" {
+		hint := styleHotkeys.Render(modalHint)
 		if activity := a.activityView(); activity != "" {
+			if a.opRunning && a.opTotal > 0 {
+				activity += styleStatus.Render(fmt.Sprintf(" %d/%d files", a.opDone, a.opTotal))
+			}
 			hint = activity + " " + hint
 		}
 		return " " + ansi.Truncate(hint, max(0, a.width-1), "…")
+	}
+	if a.opRunning {
+		return a.renderProgressBar()
 	}
 
 	type binding struct{ desc, key string }
@@ -2616,43 +2623,21 @@ func (a *App) renderModal() string {
 		title = fmt.Sprintf("Submit CL %s", m.clID)
 	}
 
-	content := styleModalTitle.Render(title) +
-		"\n\n" +
-		m.input.View() +
-		"\n\n" +
-		styleModalHint.Render("enter - confirm   esc - cancel")
-
-	return styleModalBox.Render(content)
+	return a.renderModalBox(title, a.modalInputView(m.input))
 }
 
 func (a *App) renderCheckoutModal() string {
 	co := a.checkout
-	var content string
+	title := fmt.Sprintf("Sync workspace to CL %s", co.cl)
+	body := "Sync the workspace to the selected changelist."
 	if co.hasFiles {
-		content = styleModalTitle.Render(fmt.Sprintf("Sync to CL %s", co.cl)) +
-			"\n\n" +
-			styleStatus.Render("You have open files in your workspace.") +
-			"\n\n" +
-			styleModalHint.Render("enter / y - shelve open files then sync\nesc / n   - cancel")
-	} else {
-		content = styleModalTitle.Render(fmt.Sprintf("Sync workspace to CL %s?", co.cl)) +
-			"\n\n" +
-			styleModalHint.Render("enter - confirm   esc - cancel")
+		body = "Shelve and revert open files, then sync the workspace to the selected changelist."
 	}
-	return styleModalBox.Render(content)
+	return a.renderModalBox(title, body)
 }
 
 func (a *App) renderAuthModal() string {
-	hint := "enter - login   esc - cancel"
-	if a.client.StorePassword {
-		hint = "enter - login   ctrl+enter - login & remember   esc - cancel"
-	}
-	content := styleModalTitle.Render("Session expired") +
-		"\n\n" +
-		a.authModal.input.View() +
-		"\n\n" +
-		styleModalHint.Render(hint)
-	return styleModalBox.Render(content)
+	return a.renderModalBox("Session expired", a.modalInputView(a.authModal.input))
 }
 
 // streamParent returns the parent of a known stream, or empty for a mainline.
@@ -2676,25 +2661,24 @@ func (a *App) renderIntegrateModal() string {
 		}
 		parent := shortName(im.parentStream)
 		current := shortName(im.sourceStream)
-		content := styleModalTitle.Render("Integrate") +
-			"\n\n" +
-			styleModalHint.Render(
-				fmt.Sprintf("m  Pull  %s → %s\nc  Push  %s → %s\nesc  cancel",
-					parent, current, current, parent),
-			)
-		return styleModalBox.Render(content)
+		key := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+		body := key.Render("m") + fmt.Sprintf(" Pull     %s → %s\n", parent, current) +
+			key.Render("c") + fmt.Sprintf(" Promote  %s → %s", current, parent)
+		return a.renderModalBox("Integrate", body)
 	}
 	// Classic depot
-	title := styleModalTitle.Render("Integrate")
 	var body string
 	if im.step == 0 {
-		body = "Source path:\n" + im.sourceInput.View() +
-			"\n\n" + styleModalHint.Render("enter - next   esc - cancel")
+		body = "Source path:\n" + a.modalInputView(im.sourceInput)
 	} else {
-		body = "Source: " + im.sourceInput.Value() + "\nTarget path:\n" + im.targetInput.View() +
-			"\n\n" + styleModalHint.Render("enter - integrate   esc - cancel")
+		source := ansi.Truncate("Source: "+im.sourceInput.Value(), max(1, a.popupWidth(80)-4), "…")
+		body = source + "\nTarget path:\n" + a.modalInputView(im.targetInput)
 	}
-	return styleModalBox.Render(title + "\n\n" + body)
+	rows := strings.Split(body, "\n")
+	// Keep the active input when only part of its context fits above it.
+	rows = rows[max(0, len(rows)-max(1, a.height-4)):]
+	body = strings.Join(rows, "\n")
+	return a.renderModalBox("Integrate", body)
 }
 
 func (a *App) renderStreamSwitchModal() string {
@@ -2703,9 +2687,7 @@ func (a *App) renderStreamSwitchModal() string {
 	if idx := strings.LastIndex(streamName, "/"); idx >= 0 {
 		streamName = streamName[idx+1:]
 	}
-	title := styleModalTitle.Render("Switch to " + streamName)
-	body := styleModalHint.Render("Switching...")
-	return styleModalBox.Render(title + "\n\n" + body)
+	return a.renderModalBox("Switch to "+streamName, "Switching workspace…")
 }
 
 func (a *App) renderConfirmModal() string {
@@ -2715,35 +2697,31 @@ func (a *App) renderConfirmModal() string {
 	var title, desc string
 	switch a.confirm.kind {
 	case confirmKindDeleteShelf:
-		title = "Delete shelf?"
+		title = "Delete shelf"
 		desc = styleStatus.Render(fmt.Sprintf("CL %s", a.confirm.clID))
 	case confirmKindResolve:
-		title = "Accept yours?"
+		title = "Accept yours"
 		desc = "Incoming changes will be discarded."
 		for _, flag := range a.confirm.resolveFlags {
 			if flag == "-at" {
-				title = "Accept theirs?"
+				title = "Accept theirs"
 				desc = "Local changes will be discarded."
 			}
 		}
 		desc = styleStatus.Render(fmt.Sprintf("%s\n%d selected conflict(s)", desc, len(a.confirm.files)))
 	}
-	hint := "enter - confirm   esc - cancel"
-	content := styleModalTitle.Render(title) +
-		"\n\n" +
-		desc +
-		"\n\n" +
-		styleModalHint.Render(hint)
-	return styleModalBox.Render(content)
+	return a.renderModalBox(title, desc)
 }
 
 func (a *App) renderHelpModal() string {
+	view := a.helpViewport
+	view.Height = max(1, min(view.Height, view.TotalLineCount()))
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("4"))
-	rendered := style.Width(a.helpViewport.Width).Height(a.helpViewport.Height).Render(a.helpViewport.View())
+	rendered := style.Width(view.Width).Height(view.Height).Render(view.View())
 	totalW := lipgloss.Width(rendered)
-	return panes.InjectTitle(rendered, "?", "Keybindings", totalW, true)
+	return panes.InjectTitle(rendered, "", "Keybindings", totalW, true)
 }
 
 func (a *App) fileListHasFiles() bool {
@@ -2757,8 +2735,8 @@ func (a *App) fileListHasFiles() bool {
 
 func (a *App) helpContent() string {
 	descriptionStyle := lipgloss.NewStyle()
-	key := styleHotkeyKey
-	hdr := styleHotkeys
+	key := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	hdr := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
 
 	type row struct {
 		k, desc string
@@ -2822,7 +2800,8 @@ func (a *App) helpContent() string {
 	case paneResolve:
 		local = []row{
 			{k: "enter", desc: "Open merge tool for selected file"},
-			{k: "a", desc: "Accept theirs (or branch)"},
+			{k: "a", desc: "Automatic merge"},
+			{k: "t", desc: "Accept theirs"},
 			{k: "y", desc: "Accept yours"},
 			{k: "s", desc: "Safe auto-resolve"},
 			{k: "esc", desc: "Close conflicts pane"},
@@ -2839,13 +2818,13 @@ func (a *App) helpContent() string {
 		{k: "H / L", desc: "Collapse all / Expand (browser + pending)"},
 		{k: "g", desc: "Toggle History / Diff pane"},
 		{k: "tab", desc: "Cycle panel focus"},
-		{k: "1–6", desc: "Jump to pane by number"},
-		{k: "f", desc: "Fetch (dry-run sync, shows pending count)"},
-		{k: "p", desc: "Sync selected path (browser) or entire workspace (other panes)"},
+		{k: "1–5", desc: "Jump to pane by number"},
+		{k: "f", desc: "Fetch newer mapped changelists"},
+		{k: "p", desc: "Sync selected path (browser) or workspace"},
 		{k: "r", desc: "Refresh"},
-		{k: "v", desc: "Visual / select mode (disable mouse to select text)"},
+		{k: "v", desc: "Select terminal text (disable mouse)"},
 		{k: "q", desc: "Quit"},
-		{k: "?", desc: "Close this window"},
+		{k: "esc / ?", desc: "Close this window"},
 	}
 	if a.active != paneBrowser && a.active != paneResolve {
 		global = append([]row{{k: "esc", desc: "Back to browser"}}, global...)
@@ -2865,21 +2844,44 @@ func (a *App) helpContent() string {
 	rows = append(rows, row{k: "Global", section: true})
 	rows = append(rows, global...)
 
+	width := max(1, a.helpViewport.Width)
+	keyWidth := 0
+	for i := range rows {
+		if !rows[i].section {
+			rows[i].k = formatHelpKey(rows[i].k)
+			keyWidth = max(keyWidth, lipgloss.Width(rows[i].k))
+		}
+	}
+	keyWidth = min(keyWidth, max(1, width-2))
 	var sb strings.Builder
 	for i, r := range rows {
 		if r.section {
 			if i > 0 {
 				sb.WriteByte('\n')
 			}
-			sb.WriteString(hdr.Render(fmt.Sprintf("  ── %s ──", r.k)))
+			sb.WriteString(ansi.Truncate(strings.Repeat(" ", keyWidth+1)+hdr.Render("─── "+r.k), width, "…"))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s  %s", key.Render(fmt.Sprintf("%-14s", r.k)), descriptionStyle.Render(r.desc)))
+			label := ansi.Truncate(r.k, keyWidth, "…")
+			label = strings.Repeat(" ", max(0, keyWidth-lipgloss.Width(label))) + label
+			description := ansi.Truncate(r.desc, max(0, width-keyWidth-1), "…")
+			sb.WriteString(ansi.Truncate(key.Render(label)+" "+descriptionStyle.Render(description), width, "…"))
 		}
 		if i < len(rows)-1 {
 			sb.WriteByte('\n')
 		}
 	}
 	return sb.String()
+}
+
+func formatHelpKey(keys string) string {
+	parts := strings.Split(keys, " / ")
+	for i, key := range parts {
+		switch key {
+		case "enter", "space", "tab", "esc":
+			parts[i] = "<" + key + ">"
+		}
+	}
+	return strings.Join(parts, " / ")
 }
 
 // --- async commands ---
@@ -3678,6 +3680,10 @@ func (a *App) filesToMove() []p4.OpenedFile {
 }
 
 func (a *App) execMoveToCL() tea.Cmd {
+	if a.opRunning {
+		a.status = a.opName + " in progress"
+		return nil
+	}
 	client := *a.client
 	m := a.moveModal
 	a.moveModal = nil
@@ -3734,12 +3740,7 @@ func uniqueNonDefaultCLs(files []p4.OpenedFile) []string {
 }
 
 func (a *App) renderMoveModal() string {
-	content := styleModalTitle.Render(fmt.Sprintf("Move %d file(s) to CL", len(a.moveModal.files))) +
-		"\n\n" +
-		a.moveModal.input.View() +
-		"\n\n" +
-		styleModalHint.Render("enter - confirm   esc - cancel")
-	return styleModalBox.Render(content)
+	return a.renderModalBox(fmt.Sprintf("Move %d file(s) to CL", len(a.moveModal.files)), a.modalInputView(a.moveModal.input))
 }
 
 func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {

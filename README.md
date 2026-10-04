@@ -4,9 +4,6 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 ![Screenshot](.github/Screenshot.png)
 
-> [!WARNING]
-> **Use at your own risk.** This project was built with agentic AI coding (Claude). I use lazyp4 in a production environment daily without issues, but I take no responsibility if it wipes your depot, destroys local data, or causes any other damage.
-
 ## Features
 
 - Browse open changelists and files in tree or flat view
@@ -34,6 +31,8 @@ History rows show the CL number, author initials, an author-colored `○`, and d
 The status pane and current stream show `↓N` for mapped submitted CLs newer than the workspace's highest have CL. Fetch errors clear the count, and an empty have list counts all mapped CLs. “No newer CLs” refers to this changelist watermark; individual files can still be missing or synced to older revisions.
 
 The UI follows the terminal's default text and background colors, with ANSI colors for actions and file status. Inactive borders and selected rows use subtle neutral dark shades, following lazygit's styling. Terminal transparency remains controlled by the terminal itself.
+
+Dialogs use compact boxes with titles in their borders and action shortcuts in the footer. Inputs scroll horizontally to fit the available width, and dialogs stay visible when the terminal is resized. Keybinding help uses cyan keys and green section headings. Its window fits the listed shortcuts, and long descriptions are shortened to keep each binding on one row.
 
 ## Requirements
 
@@ -103,7 +102,7 @@ Press `?` inside the app for context-sensitive help.
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate up / down |
+| `j` / `k` | Navigate down / up |
 | `tab` | Cycle pane focus |
 | `1` - `5` | Jump to pane by number |
 | `esc` | Back to browser pane |
@@ -130,7 +129,7 @@ Press `?` inside the app for context-sensitive help.
 | `d` | Discard (revert) checked-out file |
 | `u` | Revert unchanged files only (skips files with local changes) |
 | `o` | Reveal in file manager |
-| `P` | Force sync selected file or folder only (contrast: `p` syncs entire workspace) |
+| `P` | Force sync selected file or folder |
 | `D` | Mark for delete |
 
 ### Pending pane
