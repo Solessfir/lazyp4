@@ -112,6 +112,9 @@ func TestPerforceIntegration(t *testing.T) {
 	run("edit", a)
 	write(a, "second revision\n")
 	run("submit", "-d", "second revision")
+	t.Run("sync status respects mapping and empty have", func(t *testing.T) {
+		testNativeSyncStatus(t, c)
+	})
 	t.Run("history includes every revision", func(t *testing.T) {
 		entries, err := c.Filelog("//depot/a.txt", 0)
 		if err != nil || len(entries) != 2 || entries[0].Rev != 2 || entries[1].Rev != 1 {

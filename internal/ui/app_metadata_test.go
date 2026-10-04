@@ -111,7 +111,7 @@ func TestStreamSwitchQueriesMetadataAfterInfo(t *testing.T) {
 		}
 	}
 	data, _ = os.ReadFile(log)
-	if !seenCL || !seenFetch || !seenShelves || !strings.Contains(string(data), "//streams/current/...@workspace") {
-		t.Fatalf("authoritative info did not query metadata using the current stream: %s", data)
+	if !seenCL || !seenFetch || !seenShelves || !strings.Contains(string(data), "//workspace/...#have") || !strings.Contains(string(data), "//streams/current/...") {
+		t.Fatalf("authoritative info did not query metadata using the current workspace and stream: %s", data)
 	}
 }

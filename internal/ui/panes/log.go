@@ -1,12 +1,16 @@
 package panes
 
 import (
+	"crypto/md5"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/lucasb-eyer/go-colorful"
 
 	"github.com/solessfir/lazyp4/internal/p4"
 )
@@ -28,10 +32,7 @@ type LogPane struct {
 }
 
 var (
-	styleLogCL    = lipgloss.NewStyle().Faint(true)
-	styleLogCLNum = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	styleLogMeta  = lipgloss.NewStyle().Faint(true)
-	styleLogDesc  = lipgloss.NewStyle()
+	styleLogMeta = lipgloss.NewStyle().Faint(true)
 )
 
 // NewLogPane creates an empty log pane with the given section number and name.
@@ -56,9 +57,8 @@ func (p *LogPane) SetSize(w, h int) {
 	p.viewport.Width = innerW
 	p.viewport.Height = innerH
 	if len(p.entries) > 0 {
-		content, offsets := buildLogContent(p.entries, p.cursor, innerW, p.focused, p.currentCL)
-		p.entryOffsets = offsets
-		p.viewport.SetContent(content)
+		p.rerender()
+		p.scrollToCursor()
 	}
 }
 
@@ -114,7 +114,7 @@ func (p *LogPane) SelectedChange() string {
 	return p.entries[p.cursor].Change
 }
 
-// SetCurrentCL sets the CL the workspace is currently synced to, for `*` marking.
+// SetCurrentCL sets the highest CL represented by the workspace have revisions.
 func (p *LogPane) SetCurrentCL(cl string) {
 	p.currentCL = cl
 	p.rerender()
@@ -204,7 +204,29 @@ func (p *LogPane) View() string {
 		innerH = 1
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(p.viewport.View())
-	return injectDualTitle(rendered, p.titleNum, "Diff", p.titleName, p.diffActive, p.width, p.focused)
+	rendered = injectDualTitle(rendered, p.titleNum, "Diff", p.titleName, p.diffActive, p.width, p.focused)
+	if len(p.entries) > 0 {
+		e := p.entries[p.cursor]
+		counter := fmt.Sprintf("%d of %d", p.cursor+1, len(p.entries))
+		metadata := e.Author
+		if e.Client != "" {
+			metadata += "@" + e.Client
+		}
+		if e.Date != "" {
+			metadata += " · " + e.Date
+		}
+		if e.Action != "" {
+			metadata += " · " + string(e.Action)
+		}
+		label := counter
+		if available := innerW - ansi.StringWidth(counter) - 5; available > 0 && metadata != "" {
+			label = ansi.Truncate(metadata, available, "…") + " · " + counter
+		}
+		if ansi.StringWidth(label)+2 <= innerW {
+			rendered = injectFooter(rendered, label, p.focused)
+		}
+	}
+	return rendered
 }
 
 func (p *LogPane) rerender() {
@@ -235,83 +257,75 @@ func buildLogContent(entries []p4.FilelogEntry, cursor, width int, focused bool,
 	if len(entries) == 0 {
 		return styleLogMeta.Render("No history"), nil
 	}
-	descWidth := width - 2
-	if descWidth < 10 {
-		descWidth = 10
-	}
+	width = max(1, width)
 	var sb strings.Builder
 	offsets := make([]int, len(entries))
 	line := 0
+	have, _ := strconv.Atoi(currentCL)
 	for i, e := range entries {
 		offsets[i] = line
-		var suffix string
-		// Split "22 Mar 2026 15:04" into date and optional time parts.
-		datePart, timePart := e.Date, ""
-		if idx := strings.LastIndex(e.Date, " "); idx >= 0 && len(e.Date)-idx == 6 {
-			datePart = e.Date[:idx]
-			timePart = e.Date[idx+1:]
+		base := lipgloss.NewStyle()
+		if i == cursor {
+			base = cursorStyle(focused)
 		}
-		if e.Action != "" {
-			suffix = fmt.Sprintf("  %s  %s  %s  %s", e.Client, timePart, datePart, e.Action)
-		} else if timePart != "" {
-			suffix = fmt.Sprintf("  %s  %s  %s", e.Client, timePart, datePart)
-		} else {
-			suffix = fmt.Sprintf("  %s  %s", e.Client, datePart)
+		idColor := lipgloss.Color("2")
+		if change, err := strconv.Atoi(e.Change); have > 0 && err == nil && change > have {
+			idColor = lipgloss.Color("4")
 		}
-		marker := "  "
+		author := shortAuthor(e.Author)
+		marker := "○"
 		if e.Change == currentCL {
-			marker = "* "
+			marker = "●"
 		}
-		if i == cursor && focused {
-			sb.WriteString(cursorStyle(focused).Render(marker + "CL " + e.Change + suffix))
-		} else {
-			row := styleLogCLNum.Render(marker) + styleLogCLNum.Render("CL "+e.Change) + styleLogCL.Render(suffix)
-			if i == cursor {
-				row = cursorStyle(focused).Render(row)
+		prefix := base.Foreground(idColor).Render("CL "+e.Change) + base.Render(" ") +
+			base.Foreground(authorColor(e.Author)).Render(author+" "+marker) + base.Render(" ")
+		prefixWidth := ansi.StringWidth(prefix)
+		desc := strings.TrimSpace(e.Description)
+		if prefixWidth >= width {
+			if line > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(ansi.Truncate(prefix, width, "…"))
+			line++
+			prefixWidth = min(2, width-1)
+			prefix = base.Render(strings.Repeat(" ", prefixWidth))
+		}
+		rows := strings.Split(ansi.Wrap(desc, max(1, width-prefixWidth), ""), "\n")
+		for j, text := range rows {
+			row := prefix + base.Render(text)
+			if j > 0 {
+				row = base.Render(strings.Repeat(" ", min(prefixWidth, width-1)) + text)
+			}
+			row = ansi.Truncate(row, width, "…")
+			row += base.Render(strings.Repeat(" ", max(0, width-ansi.StringWidth(row))))
+			if line > 0 {
+				sb.WriteByte('\n')
 			}
 			sb.WriteString(row)
-		}
-		sb.WriteByte('\n')
-		line++
-		desc := strings.TrimSpace(e.Description)
-		if desc != "" {
-			for _, l := range wrapText(desc, descWidth) {
-				sb.WriteString(styleLogDesc.Render("  " + l))
-				sb.WriteByte('\n')
-				line++
-			}
-		}
-		if i < len(entries)-1 {
-			sb.WriteByte('\n')
 			line++
 		}
 	}
 	return sb.String(), offsets
 }
 
-// wrapText wraps text at word boundaries within maxWidth characters.
-func wrapText(text string, maxWidth int) []string {
-	var lines []string
-	for _, paragraph := range strings.Split(text, "\n") {
-		paragraph = strings.TrimSpace(paragraph)
-		if paragraph == "" {
-			continue
-		}
-		words := strings.Fields(paragraph)
-		line := ""
-		for _, w := range words {
-			if line == "" {
-				line = w
-			} else if len(line)+1+len(w) <= maxWidth {
-				line += " " + w
-			} else {
-				lines = append(lines, line)
-				line = w
-			}
-		}
-		if line != "" {
-			lines = append(lines, line)
-		}
+func shortAuthor(author string) string {
+	parts := strings.Fields(author)
+	if len(parts) > 1 {
+		author = string([]rune(parts[0])[:1]) + string([]rune(parts[1])[:1])
 	}
-	return lines
+	author = ansi.Truncate(author, 2, "")
+	return author + strings.Repeat(" ", max(0, 2-ansi.StringWidth(author)))
+}
+
+func authorColor(author string) lipgloss.Color {
+	hash := md5.Sum([]byte(author))
+	fraction := func(bytes []byte) float64 {
+		sum := 0
+		for _, b := range bytes {
+			sum += int(b)
+		}
+		return float64(sum%100) / 100
+	}
+	c := colorful.Hsl(fraction(hash[0:4])*360, 0.6+0.4*fraction(hash[4:8]), 0.4+0.2*fraction(hash[8:12]))
+	return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", uint8(c.R*255), uint8(c.G*255), uint8(c.B*255)))
 }

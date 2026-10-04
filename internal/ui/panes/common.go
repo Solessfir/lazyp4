@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -58,8 +59,8 @@ func injectFooter(rendered, text string, focused bool) string {
 	}
 	style := lipgloss.NewStyle().Foreground(color)
 
-	label := " " + text + " "
-	dashCount := measuredW - 2 - len([]rune(label))
+	label := ansi.Truncate(" "+text+" ", measuredW-2, "…")
+	dashCount := measuredW - 2 - lipgloss.Width(label)
 	if dashCount < 0 {
 		dashCount = 0
 	}
@@ -102,21 +103,13 @@ func injectDualTitle(rendered, num, firstName, secondName string, firstActive bo
 		inactiveLabel = firstName
 	}
 
-	// Measure the visual width of the full label.
-	plainLabel := prefix + firstName + separator + secondName
-	innerW := paneWidth - 2
-	dashCount := innerW - len([]rune(plainLabel))
-	if dashCount < 0 {
-		dashCount = 0
-	}
-
-	top := borderStyle.Render("╭"+prefix) +
+	innerW := max(0, paneWidth-2)
+	label := borderStyle.Render(prefix) +
 		activeStyle.Render(activeLabel) +
 		borderStyle.Render(separator) +
-		dimStyle.Render(inactiveLabel) +
-		borderStyle.Render(strings.Repeat("─", dashCount)+"╮")
-
-	lines[0] = top
+		dimStyle.Render(inactiveLabel)
+	label = ansi.Truncate(label, innerW, "…")
+	lines[0] = borderStyle.Render("╭") + label + borderStyle.Render(strings.Repeat("─", max(0, innerW-lipgloss.Width(label)))+"╮")
 	return strings.Join(lines, "\n")
 }
 
@@ -145,11 +138,9 @@ func injectTitle(rendered, num, name string, paneWidth int, focused bool) string
 	} else {
 		label = "───[" + num + "]─" + name
 	}
-	innerW := paneWidth - 2 // subtract ╭ and ╮
-	dashCount := innerW - len([]rune(label))
-	if dashCount < 0 {
-		dashCount = 0
-	}
+	innerW := max(0, paneWidth-2)
+	label = ansi.Truncate(label, innerW, "…")
+	dashCount := max(0, innerW-lipgloss.Width(label))
 	top := style.Render("╭" + label + strings.Repeat("─", dashCount) + "╮")
 
 	lines[0] = top

@@ -592,20 +592,58 @@ func descriptionSpec(description string) string {
 
 // CurrentCL returns the highest CL currently synced in the workspace (have revision).
 func (c *Client) CurrentCL() string {
-	scope := "//..."
-	if c.Stream != "" {
-		scope = c.Stream + "/..."
-	}
-	out, err := c.run("changes", "-m1", "-s", "submitted", scope+"@"+c.Workspace)
-	if err != nil || strings.TrimSpace(out) == "" {
+	change, err := c.currentCL()
+	if err != nil || change == 0 {
 		return ""
 	}
-	// "Change N on date by user@client 'desc'"
-	parts := strings.Fields(out)
-	if len(parts) >= 2 {
-		return parts[1]
+	return strconv.Itoa(change)
+}
+
+func (c *Client) syncStatusScope() string {
+	if c.Workspace != "" {
+		return "//" + c.Workspace + "/..."
 	}
-	return ""
+	if c.Stream != "" {
+		return c.Stream + "/..."
+	}
+	return "//..."
+}
+
+func (c *Client) currentCL() (int, error) {
+	changes, err := c.submittedChangeNumbers("-m1", c.syncStatusScope()+"#have")
+	if err != nil {
+		return 0, err
+	}
+	if len(changes) == 0 {
+		return 0, nil
+	}
+	if len(changes) != 1 {
+		return 0, fmt.Errorf("changes returned more than one current changelist")
+	}
+	return changes[0], nil
+}
+
+func (c *Client) submittedChangeNumbers(options ...string) ([]int, error) {
+	out, err := c.run(append([]string{"changes", "-s", "submitted"}, options...)...)
+	if err != nil {
+		return nil, err
+	}
+	var changes []int
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+		if len(parts) < 2 || parts[0] != "Change" {
+			return nil, fmt.Errorf("unexpected changes output: %s", line)
+		}
+		change, err := strconv.Atoi(parts[1])
+		if err != nil || change <= 0 {
+			return nil, fmt.Errorf("invalid changelist in changes output: %s", line)
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
 }
 
 // Changes returns submitted changelists that affected the given depot path.
@@ -1529,36 +1567,18 @@ func (c *Client) IntegrateClassic(source, target string) (string, error) {
 	return c.run("integrate", fileSpec(source), fileSpec(target))
 }
 
-// SyncDryRun returns the number of changelists the workspace is behind head.
+// SyncDryRun counts mapped changelists newer than the highest synced changelist.
 func (c *Client) SyncDryRun() (int, error) {
-	// Get the have CL as a number first to avoid per-file revision ambiguity.
-	haveCL := c.CurrentCL()
-	if haveCL == "" {
-		return 0, nil
-	}
-	scope := "//..."
-	if c.Stream != "" {
-		scope = c.Stream + "/..."
-	}
-	out, err := c.run("changes", "-s", "submitted", fmt.Sprintf("%s@%s,#head", scope, haveCL))
+	haveCL, err := c.currentCL()
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "up-to-date") || strings.Contains(msg, "no such file") {
-			return 0, nil
-		}
 		return 0, err
 	}
-	count := 0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line != "" {
-			count++
-		}
+	// -e includes its boundary, so start after the highest have changelist.
+	changes, err := c.submittedChangeNumbers("-e", strconv.Itoa(haveCL+1), c.syncStatusScope())
+	if err != nil {
+		return 0, err
 	}
-	// subtract 1 to exclude the have CL itself
-	if count > 0 {
-		count--
-	}
-	return count, nil
+	return len(changes), nil
 }
 
 // SwitchToStream switches the current workspace to the given stream using

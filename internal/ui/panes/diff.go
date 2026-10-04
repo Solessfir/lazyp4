@@ -6,12 +6,13 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // DiffPane shows colorized p4 diff output for the selected file.
 type DiffPane struct {
 	viewport   viewport.Model
-	raw        string // stored so we can re-truncate on resize
+	raw        string // stored so we can rewrap on resize
 	focused    bool
 	diffActive bool // true = Diff is the visible bottom-right pane
 	width      int
@@ -65,11 +66,12 @@ func (p *DiffPane) SetDiffActive(active bool) {
 func (p *DiffPane) SetContent(raw string) {
 	p.raw = raw
 	p.rerender()
+	p.viewport.GotoTop()
 }
 
 func (p *DiffPane) rerender() {
 	p.viewport.SetContent(colorize(p.raw, p.viewport.Width))
-	p.viewport.GotoTop()
+	p.viewport.SetYOffset(p.viewport.YOffset)
 }
 
 // Init satisfies tea.Model.
@@ -100,34 +102,38 @@ func (p *DiffPane) View() string {
 	return injectDualTitle(rendered, "5", "Diff", "History", p.diffActive, p.width, p.focused)
 }
 
-// colorize applies ANSI colors to unified diff lines, truncating each to maxWidth.
+// colorize wraps unified diff lines without losing their contents or colors.
 func colorize(raw string, maxWidth int) string {
 	lines := strings.Split(raw, "\n")
 	var sb strings.Builder
 	for i, line := range lines {
-		if maxWidth > 0 {
-			runes := []rune(line)
-			if len(runes) > maxWidth {
-				line = string(runes[:maxWidth])
+		line = strings.TrimSuffix(line, "\r")
+		// Expand tabs before wrapping so indentation has a stable cell width.
+		if strings.ContainsRune(line, '\t') {
+			parts := strings.Split(line, "\t")
+			line = parts[0]
+			for _, part := range parts[1:] {
+				line += strings.Repeat(" ", 8-ansi.StringWidth(line)%8) + part
 			}
 		}
+		wrapped := ansi.Hardwrap(line, maxWidth, true)
 		var colored string
 		switch {
 		case strings.HasPrefix(line, "==== ") || strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
-			colored = styleDiffHdr.Render(line)
+			colored = styleDiffHdr.Render(wrapped)
 		case strings.HasPrefix(line, "@@"):
 			if end := strings.Index(line[2:], "@@"); end >= 0 {
 				end += 4
-				colored = styleDiffHunk.Render(line[:end]) + styleDiffCtx.Render(line[end:])
+				colored = ansi.Hardwrap(styleDiffHunk.Render(line[:end])+styleDiffCtx.Render(line[end:]), maxWidth, true)
 			} else {
-				colored = styleDiffHunk.Render(line)
+				colored = styleDiffHunk.Render(wrapped)
 			}
 		case strings.HasPrefix(line, "+"):
-			colored = styleDiffAdd.Render(line)
+			colored = styleDiffAdd.Render(wrapped)
 		case strings.HasPrefix(line, "-"):
-			colored = styleDiffDel.Render(line)
+			colored = styleDiffDel.Render(wrapped)
 		default:
-			colored = line
+			colored = wrapped
 		}
 		sb.WriteString(colored)
 		if i < len(lines)-1 {

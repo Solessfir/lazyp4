@@ -11,12 +11,12 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 - Browse open changelists and files in tree or flat view
 - Color-coded file status - yellow = modified, default = checked out unchanged, green = added, red = deleted
-- Colorized unified diff viewer
-- File revision history
+- Colorized unified diff viewer with wrapped lines
+- Compact file revision history with author colors and workspace details
 - Mark individual files for partial submit
 - Shelve and unshelve changelists (including cross-stream via `-S`)
 - Stream depot support - stream browser, stream switching, merge/copy integration
-- Fetch (dry-run sync) - see how many CLs are pending before committing to a sync
+- Fetch - see how many mapped CLs are newer than the workspace's highest have CL
 - Reconcile offline changes (`p4 reconcile` + `p4 edit` fallback)
 - Discard added files with optional local delete (`dd`)
 - Skip discard confirmation for files with no local changes
@@ -27,7 +27,11 @@ A lazygit-inspired terminal UI for Perforce (p4).
 - Context-sensitive hotkey bar
 - Animated action status in the footer, with progress counts and cancellation for sync and submit
 
-During actions and background loads, the footer shows the action name with animated dots, such as `Checking out ●∙∙`. The indicator stays active while work is running, including while dialogs are open, and disappears when the work finishes or fails. Sync and submit also show file progress and a `c - cancel` hint when cancellation is available.
+During actions and background loads, the footer shows the action name with animated dots, such as `Checking out ●∙∙`. Stream actions, including fetch, sync, pull, promotion, and submit, also show cyan activity beside the current stream. The indicators stay active while work is running, including while dialogs are open, and disappear when the work finishes or fails. Sync and submit also show file progress and a `c - cancel` hint when cancellation is available.
+
+History rows show the CL number, author initials, an author-colored `○`, and description. `●` marks the highest submitted CL represented by the workspace's have revisions; newer CL numbers appear blue. The bottom border shows the selected author, workspace, date, and position as space allows.
+
+The status pane and current stream show `↓N` for mapped submitted CLs newer than the workspace's highest have CL. Fetch errors clear the count, and an empty have list counts all mapped CLs. “No newer CLs” refers to this changelist watermark; individual files can still be missing or synced to older revisions.
 
 The UI follows the terminal's default text and background colors, with ANSI colors for actions and file status. Inactive borders and selected rows use subtle neutral dark shades, following lazygit's styling. Terminal transparency remains controlled by the terminal itself.
 
@@ -104,7 +108,7 @@ Press `?` inside the app for context-sensitive help.
 | `1` - `5` | Jump to pane by number |
 | `esc` | Back to browser pane |
 | `g` | Toggle history / diff pane |
-| `f` | Fetch - dry-run sync, shows pending file count |
+| `f` | Fetch - count mapped CLs newer than the highest have CL |
 | `p` | Sync selected path (browser pane) or entire workspace (other panes) |
 | `r` | Refresh |
 | `c` | Cancel current operation |

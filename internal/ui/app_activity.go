@@ -89,3 +89,28 @@ func (a *App) activityView() string {
 	}
 	return styleActivity.Render(label + " " + a.activity.spinner.View())
 }
+
+func (a *App) streamActivityView() string {
+	streamAction := func(label string) bool {
+		switch label {
+		case "Fetching", "Syncing", "Force syncing", "Checking out", "Switching stream", "Pulling", "Promoting", "Integrating", "Preparing submit", "Submitting":
+			return true
+		}
+		return false
+	}
+	label := ""
+	if a.opRunning && streamAction(a.opName) {
+		label = a.opName
+	} else {
+		var latest uint64
+		for id, pending := range a.activity.pending {
+			if id > latest && streamAction(pending) {
+				latest, label = id, pending
+			}
+		}
+	}
+	if label == "" {
+		return ""
+	}
+	return label + " " + a.activity.spinner.View()
+}

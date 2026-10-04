@@ -21,6 +21,8 @@ var (
 type StreamsPane struct {
 	streams      []p4.StreamInfo
 	current      string // current stream path e.g. //depot/main
+	pending      int
+	activity     string
 	cursor       int
 	visiblePaths []string // depth-first render order, matches row indices
 	scrollOffset int
@@ -30,7 +32,7 @@ type StreamsPane struct {
 }
 
 func NewStreamsPane() *StreamsPane {
-	return &StreamsPane{}
+	return &StreamsPane{pending: -1}
 }
 
 func (p *StreamsPane) SetSize(w, h int) {
@@ -42,7 +44,14 @@ func (p *StreamsPane) SetFocused(f bool) { p.focused = f }
 
 func (p *StreamsPane) ScrollOffset() int { return p.scrollOffset }
 
+func (p *StreamsPane) SetPending(n int)        { p.pending = n }
+func (p *StreamsPane) SetActivity(text string) { p.activity = text }
+
 func (p *StreamsPane) SetStreams(streams []p4.StreamInfo, current string) {
+	if p.current != "" && current != p.current {
+		p.pending = -1
+		p.activity = ""
+	}
 	p.streams = streams
 	p.current = current
 	p.buildVisibleList()
@@ -174,23 +183,41 @@ func (p *StreamsPane) renderNode(node *streamNode, prefix string, isLast bool, d
 
 	marker := "  "
 	nameStyle := styleStreamNormal
+	var badge string
+	badgeColor := lipgloss.Color("6")
 	if s.Path == p.current {
 		marker = "* "
 		nameStyle = styleStreamCurrent
+		switch {
+		case p.activity != "":
+			badge = p.activity
+		case p.pending > 0:
+			badge = fmt.Sprintf("↓%d", p.pending)
+			badgeColor = lipgloss.Color("3")
+		}
 	}
 
 	innerW := max(1, p.width-2)
-	name = ansi.Truncate(name, max(0, innerW-lipgloss.Width(marker+prefix+connector)), "…")
-	line := nameStyle.Render(marker) + styleStreamTree.Render(prefix+connector) + nameStyle.Render(name)
-	if *idx == p.cursor {
-		style := cursorStyle(p.focused)
-		if s.Path == p.current {
-			style = style.Foreground(lipgloss.Color("2"))
-		}
-		// Render the selection in one style so nested resets cannot clear its background.
-		line = style.Width(innerW).Render(ansi.Truncate(marker+prefix+connector+name, innerW, "…"))
+	nameW := max(0, innerW-lipgloss.Width(marker+prefix+connector))
+	badge = ansi.Truncate(badge, max(0, nameW-1), "…")
+	if badge != "" {
+		nameW -= lipgloss.Width(badge) + 1
 	}
-	*rows = append(*rows, ansi.Truncate(line, innerW, "…"))
+	name = ansi.Truncate(name, nameW, "…")
+	rowStyle := lipgloss.NewStyle()
+	if *idx == p.cursor {
+		rowStyle = cursorStyle(p.focused)
+	}
+	nameStyle = nameStyle.Inherit(rowStyle)
+	line := nameStyle.Render(marker) + styleStreamTree.Inherit(rowStyle).Render(prefix+connector) + nameStyle.Render(name)
+	if badge != "" {
+		line += rowStyle.Foreground(badgeColor).Render(" " + badge)
+	}
+	line = ansi.Truncate(line, innerW, "…")
+	if *idx == p.cursor {
+		line += rowStyle.Render(strings.Repeat(" ", max(0, innerW-lipgloss.Width(line))))
+	}
+	*rows = append(*rows, line)
 	*idx++
 
 	var childPrefix string
@@ -257,6 +284,13 @@ func (p *StreamsPane) View() string {
 		if lipgloss.Width(label)+4 <= p.width {
 			rendered = injectFooter(rendered, label, p.focused)
 		}
+	}
+	if p.width > 0 {
+		lines := strings.Split(rendered, "\n")
+		for i := range lines {
+			lines[i] = ansi.Truncate(lines[i], p.width, "")
+		}
+		rendered = strings.Join(lines, "\n")
 	}
 	return rendered
 }

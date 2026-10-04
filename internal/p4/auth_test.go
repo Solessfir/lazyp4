@@ -54,6 +54,20 @@ func TestMain(m *testing.M) {
 		}
 	}
 	switch args[0] {
+	case "changes":
+		if os.Getenv("LAZYP4_AUTH_CHANGES_HELPER") != "1" {
+			fmt.Fprintln(os.Stderr, "unexpected authentication command")
+			os.Exit(2)
+		}
+		setting := "LAZYP4_AUTH_CHANGES_HEAD"
+		if strings.HasSuffix(args[len(args)-1], "#have") {
+			setting = "LAZYP4_AUTH_CHANGES_HAVE"
+		}
+		fmt.Print(os.Getenv(setting))
+		if message := os.Getenv(setting + "_ERROR"); message != "" {
+			fmt.Fprintln(os.Stderr, message)
+			os.Exit(1)
+		}
 	case "info":
 		if os.Getenv("LAZYP4_AUTH_INFO_FAIL") == "1" {
 			fmt.Fprintln(os.Stderr, "The authenticity of this server's SSL fingerprint is not established. Use p4 trust.")

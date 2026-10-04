@@ -150,3 +150,123 @@ func TestStreamsCurrentSelectionRetainsGreen(t *testing.T) {
 		t.Fatalf("focused current stream lost its green foreground: %q", row)
 	}
 }
+
+func TestStreamsBadgesOnlyDescribeCurrentStream(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		pending  int
+		activity string
+		badge    string
+	}{
+		{name: "unknown", pending: -1},
+		{name: "pending", pending: 12, badge: "↓12"},
+		{name: "zero", pending: 0},
+		{name: "active", pending: 12, activity: "Syncing ●∙∙", badge: "Syncing ●∙∙"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := NewStreamsPane()
+			p.SetSize(48, 8)
+			p.SetStreams(streamFixture(), "//depot/feature")
+			p.SetPending(test.pending)
+			p.SetActivity(test.activity)
+			lines := streamViewLines(t, p, 48, 8)
+			want := "* ├── feature"
+			if test.badge != "" {
+				want += " " + test.badge
+			}
+			if current := streamBodyRow(lines[2]); current != want {
+				t.Fatalf("current stream row = %q, want %q", current, want)
+			}
+			for i, row := range lines[1:7] {
+				if i != 1 && (strings.Contains(row, "↓") || strings.Contains(row, "✓") || strings.Contains(row, "Syncing")) {
+					t.Fatalf("noncurrent stream has a workspace badge: %q", row)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamsBadgesResetWithCurrentStream(t *testing.T) {
+	p := NewStreamsPane()
+	if p.pending != -1 {
+		t.Fatal("new stream pane assumes a known sync state")
+	}
+	p.SetPending(7)
+	p.SetActivity("Loading ●∙∙")
+	p.SetStreams(streamFixture(), "//depot/main")
+	if p.pending != 7 || p.activity != "Loading ●∙∙" {
+		t.Fatal("initial stream snapshot discarded an earlier sync result")
+	}
+	p.SetStreams(streamFixture(), "//depot/main")
+	if p.pending != 7 || p.activity != "Loading ●∙∙" {
+		t.Fatal("same stream refresh reset its activity")
+	}
+	p.SetStreams(streamFixture(), "//depot/feature")
+	if p.pending != -1 || p.activity != "" {
+		t.Fatal("new current stream inherited the previous workspace badge")
+	}
+}
+
+func TestStreamsBadgeTruncationPreservesUnicodeAndWidth(t *testing.T) {
+	for _, width := range []int{1, 2, 3, 5, 9, 16, 30, 48} {
+		p := NewStreamsPane()
+		p.SetSize(width, 4)
+		p.SetStreams([]p4.StreamInfo{{Path: "//depot/main", Name: strings.Repeat("特🌿é", 20)}}, "//depot/main")
+		p.SetActivity("Syncing ●∙∙")
+		lines := streamViewLines(t, p, width, 4)
+		if width >= 16 && !strings.Contains(lines[1], "Syncing ●∙∙") {
+			t.Fatalf("width %d truncated an action that fits: %q", width, lines[1])
+		}
+		if width >= 30 && !strings.Contains(lines[1], "…") {
+			t.Fatalf("width %d did not truncate the name to preserve its badge: %q", width, lines[1])
+		}
+	}
+}
+
+func TestStreamsSelectedBadgeRetainsSemanticColorsAndBackground(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	backgroundCode := regexp.MustCompile("48;2;[0-9]+;[0-9]+;[0-9]+").FindString(cursorStyle(true).Render("x"))
+	for _, focused := range []bool{false, true} {
+		for _, active := range []bool{false, true} {
+			p := NewStreamsPane()
+			p.SetSize(32, 4)
+			p.SetStreams([]p4.StreamInfo{{Path: "//depot/main", Name: "main"}}, "//depot/main")
+			p.SetFocused(focused)
+			p.SetPending(5)
+			color := "33|93"
+			if active {
+				p.SetActivity("Syncing ●∙∙")
+				color = "36|96"
+			}
+			var rows []string
+			idx := 0
+			p.renderNode(buildTree(p.streams)[0], "", true, 0, &rows, &idx)
+			row := rows[0]
+			for _, codes := range []string{"32|92", color} {
+				if !regexp.MustCompile("\x1b\\[(?:[0-9]+;)*(?:" + codes + ")(?:;[0-9]+)*m").MatchString(row) {
+					t.Fatalf("selected stream lost foreground %s: %q", codes, row)
+				}
+			}
+			background := false
+			previous := 0
+			for _, match := range regexp.MustCompile("\x1b\\[([0-9;]*)m").FindAllStringSubmatchIndex(row, -1) {
+				if ansi.StringWidth(row[previous:match[0]]) > 0 && background != focused {
+					t.Fatalf("selected row background changed within a visible segment: %q", row)
+				}
+				codes := row[match[2]:match[3]]
+				if codes == "" || codes == "0" || strings.Contains(codes, "49") {
+					background = false
+				}
+				if strings.Contains(codes, backgroundCode) {
+					background = true
+				}
+				previous = match[1]
+			}
+			if lipgloss.Width(row) != 30 {
+				t.Fatalf("selection did not span the entire stream row: %q", row)
+			}
+		}
+	}
+}

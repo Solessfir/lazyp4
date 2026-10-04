@@ -954,6 +954,9 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.client.Port = m.info.ServerAddr
 			}
 			a.statusPane.SetInfo(m.info)
+			if rootsChanged {
+				a.streamsPane.SetPending(-1)
+			}
 			cmds := []tea.Cmd{a.cmdFetchCurrentCL(), a.cmdFetch(), a.cmdLoadShelved()}
 			a.isStreamDepot = m.info.Stream != ""
 			if a.isStreamDepot {
@@ -1007,6 +1010,7 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.streams = m.streams
 			a.showStreams = true
 			a.streamsPane.SetStreams(m.streams, a.statusPane.CurrentStream())
+			a.streamsPane.SetPending(a.statusPane.Pending())
 			a.relayout()
 		}
 		return a, nil
@@ -1020,15 +1024,17 @@ func (a *App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.setOffline(true)
 			} else {
 				a.status = "fetch error: " + m.err.Error()
-				a.statusPane.SetPending(0)
+				a.statusPane.SetPending(-1)
 			}
-			a.cmdLog.Add("p4 sync -n", "error: "+m.err.Error())
+			a.streamsPane.SetPending(-1)
+			a.cmdLog.Add("p4 changes", "error: "+m.err.Error())
 		} else {
 			a.setOffline(false)
 			a.statusPane.SetPending(m.count)
+			a.streamsPane.SetPending(m.count)
 			if m.count == 0 {
-				a.status = "Up to date"
-				a.cmdLog.Add("p4 changes", "up to date")
+				a.status = "No newer CLs"
+				a.cmdLog.Add("p4 changes", "no newer CLs")
 			} else {
 				a.status = fmt.Sprintf("Fetch: %d CL(s) behind", m.count)
 				a.cmdLog.Add("p4 changes", fmt.Sprintf("↓%d CLs behind", m.count))
@@ -2010,6 +2016,9 @@ func (a *App) setOffline(offline bool) {
 	a.offlineMode = offline
 	a.statusPane.SetOffline(offline)
 	if offline {
+		a.streamsPane.SetPending(-1)
+	}
+	if offline {
 		a.status = "Offline — p4 server unreachable"
 	}
 }
@@ -2373,6 +2382,7 @@ func (a *App) View() string {
 
 	leftParts := []string{a.statusPane.View(), a.browserPane.View()}
 	if a.showStreams {
+		a.streamsPane.SetActivity(a.streamActivityView())
 		leftParts = append(leftParts, a.streamsPane.View())
 	}
 	leftParts = append(leftParts, a.shelvedPane.View())
@@ -2943,6 +2953,8 @@ func (a *App) cmdFetchCurrentCL() tea.Cmd {
 }
 
 func (a *App) cmdFetch() tea.Cmd {
+	a.statusPane.SetFetching()
+	a.streamsPane.SetPending(-1)
 	a.fetchRequest++
 	request := a.fetchRequest
 	client := *a.client
