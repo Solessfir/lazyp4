@@ -6,7 +6,34 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/solessfir/lazyp4/internal/p4"
+	"github.com/solessfir/lazyp4/internal/ui/panes"
 )
+
+func TestStreamClickUsesScrolledRow(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.showStreams = true
+	for i := range 12 {
+		a.streams = append(a.streams, p4.StreamInfo{Path: fmt.Sprintf("//depot/stream%d", i), Type: "mainline"})
+	}
+	a.streamsPane.SetStreams(a.streams, a.streams[0].Path)
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a.streamsPane.JumpBottom()
+	a.View()
+	offset := a.streamsPane.ScrollOffset()
+	if offset == 0 {
+		t.Fatal("long stream list did not scroll to the selection")
+	}
+	const streamsHeight = 10
+	streamsTop := a.height - 1 - panes.CmdLogHeight - streamsHeight - a.shelvedPane.PreferredHeight()
+	a.handleClick(1, streamsTop+1)
+	if a.active != paneStreams || a.streamsPane.SelectedStream() != a.streams[offset].Path {
+		t.Fatal("click selected a hidden stream instead of the visible row")
+	}
+	a.handleClick(1, streamsTop+streamsHeight-1)
+	if a.streamsPane.SelectedStream() != a.streams[offset].Path {
+		t.Fatal("clicking the stream footer changed the selection")
+	}
+}
 
 func TestPaneNumbersMatchDisplayedTitles(t *testing.T) {
 	for _, streams := range []bool{false, true} {

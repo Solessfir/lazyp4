@@ -1,19 +1,20 @@
 package panes
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/solessfir/lazyp4/internal/p4"
 )
 
 var (
-	styleStreamCurrent = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	styleStreamCurrent = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	styleStreamNormal  = lipgloss.NewStyle()
 	styleStreamTree    = lipgloss.NewStyle().Faint(true)
-	styleStreamType    = lipgloss.NewStyle().Faint(true)
 )
 
 // StreamsPane displays the stream hierarchy for the current depot.
@@ -22,6 +23,7 @@ type StreamsPane struct {
 	current      string // current stream path e.g. //depot/main
 	cursor       int
 	visiblePaths []string // depth-first render order, matches row indices
+	scrollOffset int
 	focused      bool
 	width        int
 	height       int
@@ -37,6 +39,8 @@ func (p *StreamsPane) SetSize(w, h int) {
 }
 
 func (p *StreamsPane) SetFocused(f bool) { p.focused = f }
+
+func (p *StreamsPane) ScrollOffset() int { return p.scrollOffset }
 
 func (p *StreamsPane) SetStreams(streams []p4.StreamInfo, current string) {
 	p.streams = streams
@@ -168,31 +172,25 @@ func (p *StreamsPane) renderNode(node *streamNode, prefix string, isLast bool, d
 		}
 	}
 
-	typeLabel := styleStreamType.Render(" (" + s.Type + ")")
-	var namePart string
+	marker := "  "
+	nameStyle := styleStreamNormal
 	if s.Path == p.current {
-		namePart = styleStreamCurrent.Render("* " + name)
-	} else {
-		namePart = styleStreamNormal.Render(name)
+		marker = "* "
+		nameStyle = styleStreamCurrent
 	}
 
-	var line string
-	if *idx == p.cursor && p.focused {
-		// Build plain text for cursor row: inner ANSI resets from concatenated
-		// styled strings would kill the cursor background mid-row, so render as
-		// one clean string with no inner style conflicts.
-		cursorName := name
+	innerW := max(1, p.width-2)
+	name = ansi.Truncate(name, max(0, innerW-lipgloss.Width(marker+prefix+connector)), "…")
+	line := nameStyle.Render(marker) + styleStreamTree.Render(prefix+connector) + nameStyle.Render(name)
+	if *idx == p.cursor {
+		style := cursorStyle(p.focused)
 		if s.Path == p.current {
-			cursorName = "* " + name
+			style = style.Foreground(lipgloss.Color("2"))
 		}
-		line = cursorStyle(p.focused).Width(p.width - 2).Render(prefix + connector + cursorName + " (" + s.Type + ")")
-	} else {
-		line = styleStreamTree.Render(prefix+connector) + namePart + typeLabel
-		if *idx == p.cursor {
-			line = cursorStyle(p.focused).Width(p.width - 2).Render(line)
-		}
+		// Render the selection in one style so nested resets cannot clear its background.
+		line = style.Width(innerW).Render(ansi.Truncate(marker+prefix+connector+name, innerW, "…"))
 	}
-	*rows = append(*rows, line)
+	*rows = append(*rows, ansi.Truncate(line, innerW, "…"))
 	*idx++
 
 	var childPrefix string
@@ -225,6 +223,13 @@ func (p *StreamsPane) View() string {
 		p.renderNode(root, "", i == len(roots)-1, 0, &rows, &idx)
 	}
 
+	if p.cursor < p.scrollOffset {
+		p.scrollOffset = p.cursor
+	} else if p.cursor >= p.scrollOffset+innerH {
+		p.scrollOffset = p.cursor - innerH + 1
+	}
+	p.scrollOffset = max(0, min(p.scrollOffset, len(rows)-innerH))
+	rows = rows[p.scrollOffset:min(len(rows), p.scrollOffset+innerH)]
 	for len(rows) < innerH {
 		rows = append(rows, "")
 	}
@@ -236,7 +241,24 @@ func (p *StreamsPane) View() string {
 		border = styleFocusBorder
 	}
 	rendered := border.Width(innerW).Height(innerH).Render(content)
-	return injectTitle(rendered, "3", "Streams", p.width, p.focused)
+	rendered = injectTitle(rendered, "3", "Streams", p.width, p.focused)
+	if len(p.visiblePaths) > 0 {
+		counter := fmt.Sprintf("%d of %d", p.cursor+1, len(p.visiblePaths))
+		label := counter
+		for _, stream := range p.streams {
+			if stream.Path == p.SelectedStream() && stream.Type != "" {
+				candidate := stream.Type + " · " + counter
+				if lipgloss.Width(candidate)+4 <= p.width {
+					label = candidate
+				}
+				break
+			}
+		}
+		if lipgloss.Width(label)+4 <= p.width {
+			rendered = injectFooter(rendered, label, p.focused)
+		}
+	}
+	return rendered
 }
 
 func min(a, b int) int {

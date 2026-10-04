@@ -155,6 +155,8 @@ Press `?` inside the app for context-sensitive help.
 
 Pull selects a child stream and merges its parent into the current child workspace. Promotion selects the source child while using a workspace for its parent, then stages a copy from child to parent. The app checks the workspace direction before running either operation.
 
+Streams appear as a compact hierarchy with `*` marking the workspace's current stream. The selected stream's type and position appear in the footer when space permits. Long names are shortened to fit, and the list scrolls to keep the selection visible.
+
 ### Shelved pane
 
 | Key | Action |

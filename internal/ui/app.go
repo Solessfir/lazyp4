@@ -2147,8 +2147,8 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 		case a.showStreams && y >= streamsTop && y < streamsBottom:
 			a.active = paneStreams
 			a.updateFocus()
-			if contentY := y - streamsTop - 1; contentY >= 0 {
-				a.streamsPane.SetCursor(contentY)
+			if contentY := y - streamsTop - 1; contentY >= 0 && contentY < streamsH-2 {
+				a.streamsPane.SetCursor(a.streamsPane.ScrollOffset() + contentY)
 			}
 		case y >= shelvedTop:
 			a.active = paneShelved
