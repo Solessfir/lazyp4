@@ -3,6 +3,7 @@ package panes
 import (
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -166,6 +167,15 @@ func (p *FileListPane) HasFiles() bool {
 }
 
 func (p *FileListPane) SetChangelists(cls []p4.Changelist) {
+	marked := map[string]bool{}
+	for _, cl := range cls {
+		for _, f := range cl.Files {
+			if p.marked[f.DepotFile] {
+				marked[f.DepotFile] = true
+			}
+		}
+	}
+	p.marked = marked
 	p.changelists = cls
 	p.rebuildRows()
 	if p.cursor >= len(p.rows) {
@@ -523,7 +533,7 @@ func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyMsg:
 		if p.filterMode {
 			if m.Type == tea.KeyRunes && m.Paste {
-				p.filter += string(m.Runes)
+				p.filter += sanitizeFilterPaste(m.Runes)
 				p.buildFilteredIdxs()
 				p.filterCursor = 0
 				return nil
@@ -592,6 +602,15 @@ func (p *FileListPane) Update(msg tea.Msg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func sanitizeFilterPaste(runes []rune) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, string(runes))
 }
 
 // toggleMark marks or unmarks the file under the cursor for partial submit.

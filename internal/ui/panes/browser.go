@@ -741,7 +741,7 @@ func (p *BrowserPane) Update(msg tea.Msg) tea.Cmd {
 	case tea.KeyMsg:
 		if p.filterMode {
 			if m.Type == tea.KeyRunes && m.Paste {
-				p.filter += string(m.Runes)
+				p.filter += sanitizeFilterPaste(m.Runes)
 				p.filterCursor = 0
 				return nil
 			}

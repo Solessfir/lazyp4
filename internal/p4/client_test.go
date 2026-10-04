@@ -2,10 +2,13 @@ package p4
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestScopedOperationsRejectEmptySelections(t *testing.T) {
@@ -101,5 +104,83 @@ func TestWorkspaceDirectoryRejectsTraversal(t *testing.T) {
 	c := &Client{Workspace: "workspace", Root: t.TempDir()}
 	if _, _, err := c.workspaceDirectory("//workspace/../outside"); err == nil {
 		t.Fatal("workspace path escaped its root")
+	}
+}
+
+func TestSubmitPreparationCancellation(t *testing.T) {
+	client := &Client{}
+	files := []OpenedFile{{ClientFile: "//client/first.txt"}, {ClientFile: "//client/second.txt"}}
+	for _, test := range []struct {
+		name    string
+		command string
+		log     string
+		run     func(context.Context) error
+	}{
+		{
+			name: "change detection", command: "diff -sa odd%23%40%25.txt", log: "-ztag -Mj diff -sa odd%23%40%25.txt",
+			run: func(ctx context.Context) error { _, err := client.HasChangesContext(ctx, "odd#@%.txt"); return err },
+		},
+		{
+			name: "changelist revert", command: "revert -a -c 123 //...", log: "revert -a -c 123 //...",
+			run: func(ctx context.Context) error { return client.RevertUnchangedContext(ctx, "123") },
+		},
+		{
+			name: "selected revert", command: "revert -a odd%23%40%25.txt", log: "revert -a odd%23%40%25.txt",
+			run: func(ctx context.Context) error {
+				return client.RevertUnchangedPathsContext(ctx, []string{"odd#@%.txt"})
+			},
+		},
+		{
+			name: "description read", command: "change -o 123", log: "change -o 123",
+			run: func(ctx context.Context) error { return client.Submit(ctx, "123", "new description", nil) },
+		},
+		{
+			name: "description write", command: "change -i", log: "change -o 123\nchange -i",
+			run: func(ctx context.Context) error { return client.Submit(ctx, "123", "new description", nil) },
+		},
+		{
+			name: "marked create", command: "change -i", log: "change -i",
+			run: func(ctx context.Context) error { return client.SubmitMarked(ctx, files, "description", nil) },
+		},
+		{
+			name: "marked reopen", command: "reopen -c 123 //client/first.txt", log: "change -i\nreopen -c 123 //client/first.txt",
+			run: func(ctx context.Context) error { return client.SubmitMarked(ctx, files, "description", nil) },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			log := authCLI(t)
+			marker := filepath.Join(t.TempDir(), "command-started")
+			t.Setenv("LAZYP4_AUTH_PREP_BLOCK_COMMAND", test.command)
+			t.Setenv("LAZYP4_AUTH_PREP_BLOCK_MARKER", marker)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- test.run(ctx) }()
+			for {
+				if _, err := os.Stat(marker); err == nil {
+					break
+				}
+				select {
+				case err := <-result:
+					t.Fatalf("preparation exited before cancellation: %v", err)
+				case <-ctx.Done():
+					t.Fatal("preparation did not start before timeout")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			cancel()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("preparation cancellation error = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("preparation did not stop after cancellation")
+			}
+			commands, err := os.ReadFile(log)
+			if err != nil || strings.TrimSpace(string(commands)) != test.log {
+				t.Fatalf("commands after cancellation = %q, error %v; want %q", commands, err, test.log)
+			}
+		})
 	}
 }

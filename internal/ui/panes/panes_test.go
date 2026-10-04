@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/solessfir/lazyp4/internal/p4"
 )
 
@@ -70,6 +71,56 @@ func TestFiltersAcceptPastedTextLiterally(t *testing.T) {
 			t.Fatal("pasted slash exited filter input")
 		}
 	})
+}
+
+func TestFilterPasteKeepsPanesSingleLine(t *testing.T) {
+	paste := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(strings.Repeat("A\r\n", 12) + "  β\t\x00"), Paste: true}
+	want := strings.Repeat("A", 12) + "  β"
+	t.Run("pending", func(t *testing.T) {
+		p := NewFileListPane()
+		p.SetSize(40, 10)
+		p.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{{DepotFile: "//depot/A.txt"}}}})
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		p.Update(paste)
+		if p.filter != want || lipgloss.Height(p.View()) != 10 {
+			t.Fatalf("pasted filter changed text or pane height: filter=%q, height=%d", p.filter, lipgloss.Height(p.View()))
+		}
+	})
+	t.Run("browser", func(t *testing.T) {
+		p := NewBrowserPane()
+		p.SetSize(40, 10)
+		p.SetRoots("//depot", "//workspace")
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+		p.Update(paste)
+		if p.filter != want || lipgloss.Height(p.View()) != 10 {
+			t.Fatalf("pasted filter changed text or pane height: filter=%q, height=%d", p.filter, lipgloss.Height(p.View()))
+		}
+	})
+}
+
+func TestRefreshPrunesMissingMarks(t *testing.T) {
+	p := NewFileListPane()
+	p.ToggleMode()
+	a := p4.OpenedFile{DepotFile: "//depot/A.txt", Change: "100"}
+	b := p4.OpenedFile{DepotFile: "//depot/B.txt", Change: "100"}
+	p.SetChangelists([]p4.Changelist{{ID: "100", Files: []p4.OpenedFile{a, b}}})
+	for _, cursor := range []int{1, 2} {
+		p.SetCursor(cursor)
+		p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	}
+	p.SetChangelists([]p4.Changelist{{ID: "100", Files: []p4.OpenedFile{b}}})
+	if marked := p.MarkedFiles(); len(marked) != 1 || marked[0].DepotFile != b.DepotFile || p.markedCount() != 1 {
+		t.Fatalf("refresh lost the remaining mark or retained the missing mark: %+v", marked)
+	}
+	a.Change, b.Change = "200", "200"
+	p.SetChangelists([]p4.Changelist{{ID: "200", Files: []p4.OpenedFile{a, b}}})
+	if marked := p.MarkedFiles(); len(marked) != 1 || marked[0].DepotFile != b.DepotFile {
+		t.Fatalf("reopened file restored an obsolete mark: %+v", marked)
+	}
+	p.SetChangelists(nil)
+	if p.markedCount() != 0 {
+		t.Fatal("empty refresh retained marks")
+	}
 }
 
 func TestFilteredRowsRebuildWithoutHiddenSelection(t *testing.T) {

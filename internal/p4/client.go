@@ -54,13 +54,20 @@ func (c *Client) globalFlags() []string {
 
 // run executes a p4 command and returns stdout + stderr combined on error.
 func (c *Client) run(args ...string) (string, error) {
-	cmd := exec.Command("p4", append(c.globalFlags(), args...)...)
+	return c.runContext(context.Background(), args...)
+}
+
+func (c *Client) runContext(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "p4", append(c.globalFlags(), args...)...)
 	configureP4Command(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
@@ -68,14 +75,21 @@ func (c *Client) run(args ...string) (string, error) {
 
 // runZtag executes a p4 command with -ztag as a global flag.
 func (c *Client) runZtag(args ...string) (string, error) {
+	return c.runZtagContext(context.Background(), args...)
+}
+
+func (c *Client) runZtagContext(ctx context.Context, args ...string) (string, error) {
 	flags := append([]string{"-ztag", "-Mj"}, c.globalFlags()...)
-	cmd := exec.Command("p4", append(flags, args...)...)
+	cmd := exec.CommandContext(ctx, "p4", append(flags, args...)...)
 	configureP4Command(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stdout.String()+stderr.String()))
 	}
 	return validateStructuredOutput(stdout.String())
@@ -99,7 +113,11 @@ func validateStructuredOutput(output string) (string, error) {
 
 // runWithStdin executes a p4 command with data piped to stdin.
 func (c *Client) runWithStdin(stdin string, args ...string) (string, error) {
-	cmd := exec.Command("p4", append(c.globalFlags(), args...)...)
+	return c.runWithStdinContext(context.Background(), stdin, args...)
+}
+
+func (c *Client) runWithStdinContext(ctx context.Context, stdin string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "p4", append(c.globalFlags(), args...)...)
 	configureP4Command(cmd)
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
@@ -107,6 +125,9 @@ func (c *Client) runWithStdin(stdin string, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("%s: %s", err, strings.TrimSpace(stdout.String()+stderr.String()))
 	}
 	return stdout.String(), nil
@@ -320,7 +341,7 @@ func (c *Client) Submit(ctx context.Context, clID, description string, lines cha
 		return c.streamCommand(ctx, lines, args...)
 	}
 	if description != "" {
-		if err := c.UpdateChangeDescription(clID, description); err != nil {
+		if err := c.updateChangeDescription(ctx, clID, description); err != nil {
 			return fmt.Errorf("update description: %w", err)
 		}
 	}
@@ -336,12 +357,12 @@ func (c *Client) SubmitMarked(ctx context.Context, files []OpenedFile, descripti
 	if len(files) == 0 {
 		return fmt.Errorf("select files to submit")
 	}
-	clID, err := c.CreateChange(description)
+	clID, err := c.createChange(ctx, description)
 	if err != nil {
 		return fmt.Errorf("create change: %w", err)
 	}
 	for _, f := range files {
-		if _, err := c.Reopen(clID, f.ClientFile); err != nil {
+		if _, err := c.runContext(ctx, "reopen", "-c", clID, fileSpec(f.ClientFile)); err != nil {
 			return fmt.Errorf("reopen %s: %w", f.ClientFile, err)
 		}
 	}
@@ -395,15 +416,23 @@ func (c *Client) RevertFiles(clientFiles []string) (string, error) {
 // RevertUnchanged reverts all open files in the given CL that are identical to the depot version.
 // Pass "default" for the default CL. Errors are silently ignored (no files to revert is normal).
 func (c *Client) RevertUnchanged(clID string) error {
-	_, err := c.run("revert", "-a", "-c", clID, "//...")
+	return c.RevertUnchangedContext(context.Background(), clID)
+}
+
+func (c *Client) RevertUnchangedContext(ctx context.Context, clID string) error {
+	_, err := c.runContext(ctx, "revert", "-a", "-c", clID, "//...")
 	return err
 }
 
 // RevertUnchangedPaths reverts the given paths (client files or local paths with wildcards)
 // that are identical to the depot version. Returns an error only on p4 failures.
 func (c *Client) RevertUnchangedPaths(paths []string) error {
+	return c.RevertUnchangedPathsContext(context.Background(), paths)
+}
+
+func (c *Client) RevertUnchangedPathsContext(ctx context.Context, paths []string) error {
 	args := append([]string{"revert", "-a"}, fileSpecs(paths)...)
-	_, err := c.run(args...)
+	_, err := c.runContext(ctx, args...)
 	return err
 }
 
@@ -476,7 +505,11 @@ func (c *Client) DeleteChange(clID string) error {
 // CreateChange creates a new pending changelist and returns its ID.
 // UpdateChangeDescription updates the description of an existing numbered CL.
 func (c *Client) UpdateChangeDescription(clID, description string) error {
-	out, err := c.run("change", "-o", clID)
+	return c.updateChangeDescription(context.Background(), clID, description)
+}
+
+func (c *Client) updateChangeDescription(ctx context.Context, clID, description string) error {
+	out, err := c.runContext(ctx, "change", "-o", clID)
 	if err != nil {
 		return err
 	}
@@ -498,13 +531,17 @@ func (c *Client) UpdateChangeDescription(clID, description string) error {
 		result = append(result, line)
 	}
 	spec := strings.Join(result, "\n")
-	_, err = c.runWithStdin(spec, "change", "-i")
+	_, err = c.runWithStdinContext(ctx, spec, "change", "-i")
 	return err
 }
 
 func (c *Client) CreateChange(description string) (string, error) {
+	return c.createChange(context.Background(), description)
+}
+
+func (c *Client) createChange(ctx context.Context, description string) (string, error) {
 	spec := "Change:\tnew\n" + descriptionSpec(description) + "\n"
-	out, err := c.runWithStdin(spec, "change", "-i")
+	out, err := c.runWithStdinContext(ctx, spec, "change", "-i")
 	if err != nil {
 		return "", err
 	}
@@ -1358,7 +1395,11 @@ func (c *Client) OpenedByOthers(wildcard string) (map[string]bool, error) {
 // Do NOT use -f here — that compares against depot HEAD, not the synced revision.
 // Works for both text (@@) and binary ("files differ") files.
 func (c *Client) HasChanges(clientFile string) (bool, error) {
-	out, err := c.runZtag("diff", "-sa", fileSpec(clientFile))
+	return c.HasChangesContext(context.Background(), clientFile)
+}
+
+func (c *Client) HasChangesContext(ctx context.Context, clientFile string) (bool, error) {
+	out, err := c.runZtagContext(ctx, "diff", "-sa", fileSpec(clientFile))
 	if err != nil {
 		return false, err
 	}

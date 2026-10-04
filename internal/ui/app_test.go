@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,119 @@ import (
 	"github.com/solessfir/lazyp4/internal/p4"
 	"github.com/solessfir/lazyp4/internal/ui/panes"
 )
+
+func TestSubmitPreparationCancellation(t *testing.T) {
+	for _, completed := range []bool{false, true} {
+		t.Run(fmt.Sprint(completed), func(t *testing.T) {
+			log := fakeP4(t)
+			a := New(&p4.Client{}, 0, "", false)
+			cmd := a.cmdSubmitMarkedFilter([]p4.OpenedFile{{ClientFile: "//workspace/added.txt", Action: p4.ActionAdd}}, "description")
+			var ready submitReadyMsg
+			if completed {
+				ready = cmd().(submitReadyMsg)
+			}
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+			if !completed {
+				ready = cmd().(submitReadyMsg)
+				if ready.err != context.Canceled {
+					t.Fatalf("cancelled preparation returned %v", ready.err)
+				}
+			}
+			_, next := a.Update(ready)
+			if next != nil || a.opRunning || a.opCancel != nil || !strings.Contains(a.status, "cancelled") {
+				t.Fatalf("cancelled preparation started submit: running=%v, command=%v, status=%q", a.opRunning, next != nil, a.status)
+			}
+			if data, err := os.ReadFile(log); err == nil && len(data) > 0 {
+				t.Fatalf("cancelled preparation ran p4: %s", data)
+			}
+		})
+	}
+}
+
+func TestWrappedCancellationReportsCancelled(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.opCh = make(chan string, 1)
+	a.opCh <- opErrLine(fmt.Errorf("create change: %w", context.Canceled))
+	msg := a.cmdReadOpLine()().(opEndMsg)
+	if msg.err != context.Canceled {
+		t.Fatalf("wrapped cancellation was lost: %v", msg.err)
+	}
+}
+
+func TestClickSelectionRejectsPreviousDetails(t *testing.T) {
+	for _, pane := range []activePane{paneBrowser, paneFileList} {
+		for _, history := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/%v", pane, history), func(t *testing.T) {
+				a := New(&p4.Client{}, 0, "", false)
+				a.width, a.height, a.historyMode = 120, 40, history
+				a.relayout()
+				a.fileList.SetChangelists([]p4.Changelist{{ID: "default", Files: []p4.OpenedFile{{DepotFile: "//depot/a.txt", ClientFile: "//workspace/a.txt"}}}})
+				a.browserPane.SetRoots("//depot", "//workspace")
+				a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"}})
+				a.cmdDiff("//workspace/a.txt")
+				a.cmdFilelog("//depot/a.txt")
+				diffID, logID := a.diffRequest, a.logRequest
+				x, y := 50, 1
+				if pane == paneBrowser {
+					x, y = 1, panes.StatusHeight+1
+				}
+				a.handleClick(x, y)
+				a.Update(diffDoneMsg{request: diffID, content: "obsolete diff"})
+				a.Update(logDoneMsg{request: logID, entries: []p4.FilelogEntry{{Change: "obsolete"}}})
+				if strings.Contains(a.diff.View(), "obsolete") || history && a.log.SelectedChange() == "obsolete" {
+					t.Fatal("click accepted details for the previous file")
+				}
+			})
+		}
+	}
+}
+
+func TestBrowserLoadSelectionRejectsPreviousDetails(t *testing.T) {
+	for _, load := range []string{"status", "fast", "depot"} {
+		t.Run(load, func(t *testing.T) {
+			a := New(&p4.Client{}, 0, "", false)
+			a.historyMode = false
+			a.browserPane.SetRoots("//depot", "//workspace")
+			a.browserPane.LoadChildrenFast("//workspace", nil, []p4.WorkspaceEntry{{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"}})
+			a.browserPane.NavigateTo("//workspace/a.txt")
+			a.cmdDiff("//depot/a.txt")
+			diffID := a.diffRequest
+			var msg tea.Msg
+			switch load {
+			case "status":
+				msg = browserStatusMsg{epoch: a.browserEpoch, parentPath: "//workspace", depotDirs: []string{"//workspace/dir"}}
+			case "fast":
+				msg = browserFastMsg{epoch: a.browserEpoch, parentPath: "//workspace", dirs: []string{"//workspace/dir"}, files: []p4.WorkspaceEntry{{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"}}}
+			case "depot":
+				msg = browserLoadedMsg{epoch: a.browserEpoch, parentPath: "//workspace", dirs: []string{"//workspace/dir"}, files: []string{"//workspace/a.txt"}}
+			}
+			a.Update(msg)
+			if a.browserPane.SelectedEntry() == nil || !a.browserPane.SelectedEntry().IsDir {
+				t.Fatal("fixture did not change the selected browser row")
+			}
+			a.Update(diffDoneMsg{request: diffID, content: "obsolete diff"})
+			if a.diffRequest <= diffID || strings.Contains(a.diff.View(), "obsolete") {
+				t.Fatal("browser load accepted details for the previous file")
+			}
+		})
+	}
+}
+
+func TestBrowserLoadNavigationUpdatesHistory(t *testing.T) {
+	a := New(&p4.Client{}, 0, "", false)
+	a.browserPane.SetRoots("//depot", "//workspace")
+	a.cmdFilelog("//depot/previous.txt")
+	previous := a.logRequest
+	a.browserNavTarget = "//workspace/a.txt"
+	_, cmd := a.Update(browserFastMsg{epoch: a.browserEpoch, parentPath: "//workspace", files: []p4.WorkspaceEntry{{ClientPath: "//workspace/a.txt", DepotPath: "//depot/a.txt"}}})
+	if cmd == nil || a.browserNavTarget != "" || a.logPath != "//workspace/a.txt" {
+		t.Fatalf("browser navigation did not load selected history: target=%q, log=%q", a.browserNavTarget, a.logPath)
+	}
+	a.Update(logDoneMsg{request: previous, entries: []p4.FilelogEntry{{Change: "obsolete"}}})
+	if a.log.SelectedChange() == "obsolete" {
+		t.Fatal("browser navigation accepted previous history")
+	}
+}
 
 func TestFileActionCompletionReportsActualCommand(t *testing.T) {
 	for _, op := range []string{"edit", "reconcile"} {

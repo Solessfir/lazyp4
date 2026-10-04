@@ -34,6 +34,25 @@ func TestMain(m *testing.M) {
 	if len(args) == 0 {
 		os.Exit(2)
 	}
+	if command := os.Getenv("LAZYP4_AUTH_PREP_BLOCK_COMMAND"); command != "" {
+		if strings.Join(args, " ") == command {
+			if err := os.WriteFile(os.Getenv("LAZYP4_AUTH_PREP_BLOCK_MARKER"), nil, 0600); err != nil {
+				os.Exit(2)
+			}
+			time.Sleep(time.Minute)
+			os.Exit(0)
+		}
+		if args[0] == "change" && len(args) > 1 {
+			switch args[1] {
+			case "-o":
+				fmt.Print("Change:\t123\nDescription:\n\tkeep description\n")
+				os.Exit(0)
+			case "-i":
+				fmt.Println("Change 123 created.")
+				os.Exit(0)
+			}
+		}
+	}
 	switch args[0] {
 	case "info":
 		if os.Getenv("LAZYP4_AUTH_INFO_FAIL") == "1" {
@@ -140,6 +159,8 @@ func authCLI(t *testing.T) string {
 	t.Setenv("LAZYP4_AUTH_INFO_AUTH", "")
 	t.Setenv("LAZYP4_AUTH_INFO_HIDDEN", "")
 	t.Setenv("LAZYP4_AUTH_VALID_TICKET", "")
+	t.Setenv("LAZYP4_AUTH_PREP_BLOCK_COMMAND", "")
+	t.Setenv("LAZYP4_AUTH_PREP_BLOCK_MARKER", "")
 	return log
 }
 

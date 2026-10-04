@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -710,10 +711,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.id != a.opID {
 			return a, nil
 		}
+		if m.ctx != nil {
+			if err := m.ctx.Err(); err != nil {
+				m.err = err
+			}
+		}
+		if a.opCancel != nil {
+			a.opCancel()
+			a.opCancel = nil
+		}
 		if m.err != nil {
 			a.opRunning = false
-			a.status = "submit preparation failed: " + m.err.Error()
-			a.cmdLog.Add("p4 submit", "error: "+m.err.Error())
+			if m.err == context.Canceled {
+				a.status = "Submit preparation cancelled"
+				a.cmdLog.Add("p4 submit", "cancelled")
+			} else {
+				a.status = "submit preparation failed: " + m.err.Error()
+				a.cmdLog.Add("p4 submit", "error: "+m.err.Error())
+			}
 			return a, nil
 		}
 		if len(m.files) == 0 {
@@ -983,41 +998,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				yoursOpen[f.DepotFile] = true
 			}
 		}
+		previousPath := a.browserPane.SelectedPath()
 		autoExpand := a.browserPane.LoadChildren(m.parentPath, m.dirs, m.files, nil, yoursOpen, m.othersOpen)
 		a.relayout()
-		if autoExpand != "" && a.browserNavTarget == "" {
-			return a, a.cmdBrowserLoad(autoExpand, a.browserPane.Mode())
-		}
-		if a.browserNavTarget != "" {
-			if a.browserPane.NavigateTo(a.browserNavTarget) {
-				a.browserNavTarget = ""
-			} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
-				return a, a.cmdBrowserLoad(next, a.browserPane.Mode())
-			} else {
-				a.browserNavTarget = ""
-			}
-		}
-		return a, nil
+		return a, a.cmdBrowserLoadFollowup(previousPath, autoExpand, a.browserPane.Mode())
 
 	case browserFastMsg:
 		if m.epoch != a.browserEpoch {
 			return a, nil
 		}
 		if m.err == nil {
+			previousPath := a.browserPane.SelectedPath()
 			autoExpand := a.browserPane.LoadChildrenFast(m.parentPath, m.dirs, m.files)
 			a.relayout()
-			if autoExpand != "" && a.browserNavTarget == "" {
-				return a, a.cmdBrowserLoad(autoExpand, panes.BrowserModeWorkspace)
-			}
-			if a.browserNavTarget != "" {
-				if a.browserPane.NavigateTo(a.browserNavTarget) {
-					a.browserNavTarget = ""
-				} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
-					return a, a.cmdBrowserLoad(next, panes.BrowserModeWorkspace)
-				} else {
-					a.browserNavTarget = ""
-				}
-			}
+			return a, a.cmdBrowserLoadFollowup(previousPath, autoExpand, panes.BrowserModeWorkspace)
 		}
 		return a, nil
 
@@ -1035,21 +1029,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				yoursOpen[f.DepotFile] = true
 			}
 		}
+		previousPath := a.browserPane.SelectedPath()
 		autoExpand := a.browserPane.ApplyStatus(m.parentPath, m.haveFiles, m.depotDirs, m.missingFiles, yoursOpen, m.othersOpen)
 		a.relayout()
-		if autoExpand != "" && a.browserNavTarget == "" {
-			return a, a.cmdBrowserLoad(autoExpand, panes.BrowserModeWorkspace)
-		}
-		if a.browserNavTarget != "" {
-			if a.browserPane.NavigateTo(a.browserNavTarget) {
-				a.browserNavTarget = ""
-			} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
-				return a, a.cmdBrowserLoad(next, panes.BrowserModeWorkspace)
-			} else {
-				a.browserNavTarget = ""
-			}
-		}
-		return a, nil
+		return a, a.cmdBrowserLoadFollowup(previousPath, autoExpand, panes.BrowserModeWorkspace)
 
 	case panes.BrowserNeedsSearchMsg:
 		return a, a.cmdBrowserSearch(m.Root, m.Mode)
@@ -2077,19 +2060,8 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 			a.updateFocus()
 			if contentY := y - browserTop - 1; contentY >= 0 {
 				a.browserPane.SetCursor(a.browserPane.ScrollOffset() + contentY)
-				if sel := a.browserPane.SelectedEntry(); sel != nil {
-					if sel.IsDir {
-						if a.historyMode {
-							return a, a.cmdFilelogMax(sel.DepotPath, 100)
-						}
-					} else {
-						if a.historyMode {
-							return a, a.cmdFilelog(sel.DepotPath)
-						}
-						return a, a.cmdDiff(sel.DepotPath)
-					}
-				}
 			}
+			return a, a.cmdSelectionDetails()
 		case a.showStreams && y >= streamsTop && y < streamsBottom:
 			a.active = paneStreams
 			a.updateFocus()
@@ -2117,17 +2089,8 @@ func (a *App) handleClick(x, y int) (tea.Model, tea.Cmd) {
 			if contentY >= 0 {
 				rowIdx := a.fileList.ScrollOffset() + contentY
 				a.fileList.SetCursor(rowIdx)
-				if f := a.fileList.SelectedFile(); f != nil {
-					if a.historyMode {
-						return a, a.cmdFilelog(f.DepotFile)
-					}
-					return a, a.cmdDiff(f.ClientFile)
-				} else if a.historyMode {
-					if hp := a.fileList.SelectedHistoryPath(); hp != "" {
-						return a, a.cmdFilelog(hp)
-					}
-				}
 			}
+			return a, a.cmdSelectionDetails()
 		} else {
 			a.active = a.currentRightPane()
 			a.updateFocus()
@@ -2984,6 +2947,25 @@ func (a *App) cmdSelectionDetails() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+func (a *App) cmdBrowserLoadFollowup(previousPath, autoExpand string, mode panes.BrowserMode) tea.Cmd {
+	var load tea.Cmd
+	if autoExpand != "" && a.browserNavTarget == "" {
+		load = a.cmdBrowserLoad(autoExpand, mode)
+	} else if a.browserNavTarget != "" {
+		if a.browserPane.NavigateTo(a.browserNavTarget) {
+			a.browserNavTarget = ""
+		} else if next := a.browserPane.FirstUnloadedAncestor(a.browserNavTarget); next != "" {
+			load = a.cmdBrowserLoad(next, mode)
+		} else {
+			a.browserNavTarget = ""
+		}
+	}
+	if a.active == paneBrowser && previousPath != a.browserPane.SelectedPath() {
+		return tea.Batch(load, a.cmdSelectionDetails())
+	}
+	return load
+}
+
 // cmdFilelogForSelection returns a filelog command for whatever is currently selected,
 // used when switching panes in history mode.
 func (a *App) cmdFilelogForSelection() tea.Cmd {
@@ -3288,6 +3270,9 @@ type revertDoneMsg struct {
 }
 
 func opErrLine(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "\x00" + context.Canceled.Error()
+	}
 	if err != nil {
 		return "\x00" + err.Error()
 	}
@@ -3621,7 +3606,7 @@ func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {
 	a.opTotal = 0
 	a.opDone = 0
 	return a.cmdOpStart(func(ctx context.Context, ch chan<- string) {
-		if err := client.RevertUnchanged(clID); err != nil {
+		if err := client.RevertUnchangedContext(ctx, clID); err != nil {
 			ch <- opErrLine(err)
 			close(ch)
 			return
@@ -3634,6 +3619,7 @@ func (a *App) cmdSubmitStart(clID, description string) tea.Cmd {
 
 type submitReadyMsg struct {
 	id          uint64
+	ctx         context.Context
 	files       []p4.OpenedFile
 	description string
 	err         error
@@ -3650,14 +3636,22 @@ func (a *App) cmdSubmitMarkedFilter(files []p4.OpenedFile, description string) t
 	a.opID++
 	id := a.opID
 	client := *a.client
+	ctx, cancel := context.WithCancel(context.Background())
+	a.opCancel = cancel
 	return func() tea.Msg {
+		ready := submitReadyMsg{id: id, ctx: ctx, description: description}
 		var toSubmit []p4.OpenedFile
 		var toRevert []string
 		for _, f := range files {
+			if err := ctx.Err(); err != nil {
+				ready.err = err
+				return ready
+			}
 			if f.Action == p4.ActionEdit {
-				changed, err := client.HasChanges(f.ClientFile)
+				changed, err := client.HasChangesContext(ctx, f.ClientFile)
 				if err != nil {
-					return submitReadyMsg{id: id, err: err}
+					ready.err = err
+					return ready
 				}
 				if !changed {
 					toRevert = append(toRevert, f.ClientFile)
@@ -3667,11 +3661,13 @@ func (a *App) cmdSubmitMarkedFilter(files []p4.OpenedFile, description string) t
 			toSubmit = append(toSubmit, f)
 		}
 		if len(toRevert) > 0 {
-			if err := client.RevertUnchangedPaths(toRevert); err != nil {
-				return submitReadyMsg{id: id, err: err}
+			if err := client.RevertUnchangedPathsContext(ctx, toRevert); err != nil {
+				ready.err = err
+				return ready
 			}
 		}
-		return submitReadyMsg{id: id, files: toSubmit, description: description}
+		ready.files, ready.err = toSubmit, ctx.Err()
+		return ready
 	}
 }
 
