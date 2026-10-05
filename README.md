@@ -1,6 +1,6 @@
 # lazyp4
 
-A lazygit-inspired terminal UI for Perforce (p4).
+A terminal UI for [Perforce P4](https://www.perforce.com/products/helix-core), inspired by [lazygit](https://github.com/jesseduffield/lazygit).
 
 ![Screenshot](.github/Screenshot.png)
 
@@ -13,6 +13,12 @@ A lazygit-inspired terminal UI for Perforce (p4).
 ## Installation
 
 Download the release archive for your OS and architecture from [GitHub Releases](https://github.com/Solessfir/lazyp4/releases). Extract `lazyp4` (`lazyp4.exe` on Windows) and place it in a directory on `PATH`.
+
+On Windows, once the package is available in WinGet:
+
+```powershell
+winget install --exact --id Solessfir.lazyp4
+```
 
 Or install with Go:
 

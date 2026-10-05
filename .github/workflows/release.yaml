@@ -35,6 +35,8 @@ jobs:
         uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
-          args: release --clean
+          args: release --clean ${{ secrets.WINGET_TOKEN == '' && '--skip=winget' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Classic PAT with public_repo scope for the fork and upstream PRs.
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}

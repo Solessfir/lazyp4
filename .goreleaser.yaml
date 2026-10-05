@@ -38,3 +38,26 @@ checksum:
 
 release:
   replace_existing_artifacts: true
+
+winget:
+  - name: lazyp4
+    package_identifier: Solessfir.lazyp4
+    publisher: Solessfir
+    short_description: A terminal UI for Perforce.
+    license: MIT
+    homepage: https://github.com/Solessfir/lazyp4
+    license_url: https://github.com/Solessfir/lazyp4/blob/{{ .Tag }}/LICENSE
+    publisher_support_url: https://github.com/Solessfir/lazyp4/issues
+    skip_upload: auto
+    commit_msg_template: 'Update {{ .PackageIdentifier }} to {{ .Version }}'
+    repository:
+      owner: Solessfir
+      name: winget-pkgs
+      branch: 'lazyp4-{{ .Version }}'
+      token: '{{ .Env.WINGET_TOKEN }}'
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
