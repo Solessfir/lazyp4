@@ -5,7 +5,7 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/main.go
+  - main: ./cmd/lazyp4
     binary: lazyp4
     env:
       - CGO_ENABLED=0

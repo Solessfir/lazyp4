@@ -4,52 +4,30 @@ A lazygit-inspired terminal UI for Perforce (p4).
 
 ![Screenshot](.github/Screenshot.png)
 
-## Features
-
-- Browse open changelists and files in tree or flat view
-- Color-coded file status - yellow = modified, default = checked out unchanged, green = added, red = deleted
-- Colorized unified diff viewer with wrapped lines
-- Compact file revision history with author colors and workspace details
-- Mark individual files for partial submit
-- Shelve and unshelve changelists (including cross-stream via `-S`)
-- Stream depot support - stream browser, stream switching, merge/copy integration
-- Fetch - see how many mapped CLs are newer than the workspace's highest have CL
-- Reconcile offline changes (`p4 reconcile` + `p4 edit` fallback)
-- Discard added files with optional local delete (`dd`)
-- Skip discard confirmation for files with no local changes
-- Conflict resolution - interactive Perforce merge tools, automatic merging, safe resolve, and confirmed accept theirs/yours
-- `[?]` indicator on files needing resolve
-- Mouse support - click to focus panes and select files
-- Keyboard-driven with lazygit-style numbered pane shortcuts
-- Context-sensitive hotkey bar
-- Animated action status in the footer, with progress counts and cancellation for sync and submit
-
-During actions and background loads, the footer shows the action name with animated dots, such as `Checking out ●∙∙`. Stream actions, including fetch, sync, pull, promotion, and submit, also show cyan activity beside the current stream. The indicators stay active while work is running, including while dialogs are open, and disappear when the work finishes or fails. Sync and submit also show file progress and a `c - cancel` hint when cancellation is available.
-
-History rows show the CL number, author initials, an author-colored `○`, and description. `●` marks the highest submitted CL represented by the workspace's have revisions; newer CL numbers appear blue. The bottom border shows the selected author, workspace, date, and position as space allows.
-
-The status pane and current stream show `↓N` for mapped submitted CLs newer than the workspace's highest have CL. Fetch errors clear the count, and an empty have list counts all mapped CLs. “No newer CLs” refers to this changelist watermark; individual files can still be missing or synced to older revisions.
-
-The UI follows the terminal's default text and background colors, with ANSI colors for actions and file status. Inactive borders and selected rows use subtle neutral dark shades, following lazygit's styling. Terminal transparency remains controlled by the terminal itself.
-
-Dialogs use compact boxes with titles in their borders and action shortcuts in the footer. Inputs scroll horizontally to fit the available width, and dialogs stay visible when the terminal is resized. Keybinding help uses cyan keys and green section headings. Its window fits the listed shortcuts, and long descriptions are shortened to keep each binding on one row.
-
 ## Requirements
 
-- Go 1.25+
 - `p4` CLI installed and in `$PATH`
 - A configured Perforce workspace (`P4PORT`, `P4USER`, `P4CLIENT`, a P4CONFIG file, or the lazyp4 config file)
+- Go 1.25+ when installing with Go or building from source
 
 ## Installation
 
-Download the latest binary from [releases](https://github.com/Solessfir/lazyp4/releases).
+Download the release archive for your OS and architecture from [GitHub Releases](https://github.com/Solessfir/lazyp4/releases). Extract `lazyp4` (`lazyp4.exe` on Windows) and place it in a directory on `PATH`.
 
-Or build from source:
+Or install with Go:
+
+```bash
+go install github.com/solessfir/lazyp4/cmd/lazyp4@latest
+```
+
+The executable is installed in `GOBIN`, or `GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH`.
+
+Or build the current `main` branch from source:
 
 ```bash
 git clone https://github.com/solessfir/lazyp4
 cd lazyp4
-go build -o lazyp4 ./cmd/main.go
+go build -o lazyp4 ./cmd/lazyp4
 ```
 
 ## Configuration
@@ -105,9 +83,9 @@ Type to fuzzy-search descriptions, or start with `@` to search keys. Use arrow k
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate down / up |
-| `tab` | Cycle pane focus |
+| `Tab` | Cycle pane focus |
 | `1` - `5` | Jump to pane by number |
-| `esc` | Back to browser pane |
+| `Esc` | Back to browser pane |
 | `g` | Toggle history / diff pane |
 | `f` | Fetch - count mapped CLs newer than the highest have CL |
 | `p` | Sync selected path (browser pane) or entire workspace (other panes) |
@@ -121,12 +99,12 @@ Type to fuzzy-search descriptions, or start with `@` to search keys. Use arrow k
 
 | Key | Action |
 |-----|--------|
-| `enter` / `l` | Expand directory |
+| `Enter` / `l` | Expand directory |
 | `h` | Collapse directory |
 | `b` | Toggle Workspace / Depot Browser |
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
-| `space` | Reconcile file or folder (edit / add / delete) |
+| `Space` | Reconcile file or folder (edit / add / delete) |
 | `a` | Checkout for edit - works on files and folders (recursive) |
 | `d` | Discard (revert) checked-out file |
 | `u` | Revert unchanged files only (skips files with local changes) |
@@ -138,8 +116,8 @@ Type to fuzzy-search descriptions, or start with `@` to search keys. Use arrow k
 
 | Key | Action |
 |-----|--------|
-| `space` | Mark / unmark file for partial submit |
-| `enter` | Open file |
+| `Space` | Mark / unmark file for partial submit |
+| `Enter` | Open file |
 | `o` | Reveal in file manager |
 | `l` / `h` | Expand / collapse folder |
 | `s` | Submit - opens description prompt; uses marked files if any |
@@ -151,18 +129,16 @@ Type to fuzzy-search descriptions, or start with `@` to search keys. Use arrow k
 | `t` | Toggle tree / flat view |
 | `/` | Filter / search |
 
-Discard confirmation uses a choice list with a separate description box. Use `j` / `k` or arrow keys to choose, `enter` to execute, and `esc` to cancel. `x` reverts the confirmed files; `d` also deletes local files opened for add when that option is available.
+In discard confirmation, use `j` / `k` or arrow keys to choose, `Enter` to execute, and `Esc` to cancel. `x` reverts the confirmed files; `d` also deletes local files opened for add when that option is available.
 
 ### Streams pane
 
 | Key | Action |
 |-----|--------|
-| `enter` / `l` | Switch workspace to selected stream |
+| `Enter` / `l` | Switch workspace to selected stream |
 | `i` | Integrate - pull from parent (`m`) or push to parent (`c`) |
 
 Pull selects a child stream and merges its parent into the current child workspace. Promotion selects the source child while using a workspace for its parent, then stages a copy from child to parent. The app checks the workspace direction before running either operation.
-
-Streams appear as a compact hierarchy with `*` marking the workspace's current stream. The selected stream's type and position appear in the footer when space permits. Long names are shortened to fit, and the list scrolls to keep the selection visible.
 
 ### Shelved pane
 
@@ -177,22 +153,27 @@ Unshelve deletes the shelf only after every shelved file is confirmed restored. 
 
 | Key | Action |
 |-----|--------|
-| `enter` | Interactive `p4 resolve` for the selected conflict, honoring effective `P4MERGE` |
+| `Enter` | Interactive `p4 resolve` for the selected conflict, honoring effective `P4MERGE` |
 | `a` | Automatic merge (`-am`) of displayed scoped conflicts |
 | `t` | Accept theirs (`-at`), after confirmation |
 | `y` | Accept yours (`-ay`), after confirmation |
 | `s` | Safe automatic resolve (`-as`) of displayed scoped conflicts |
-| `esc` | Close conflicts pane |
+| `Esc` | Close conflicts pane |
 
 ### History / Log pane
 
 | Key | Action |
 |-----|--------|
-| `space` / `enter` | Checkout workspace to selected CL |
+| `Space` / `Enter` | Checkout workspace to selected CL |
 
-## Development checks
+## Development
 
-Run `go test ./...` and `go vet ./...`. Native configuration tests run when `p4` is in PATH. Set `LAZYP4_TEST_P4D` to a `p4d` executable to also run server integration tests against temporary loopback servers and workspaces. CI runs these separately from the platform test matrix.
+```bash
+go test ./...
+go vet ./...
+```
+
+Native configuration tests run when `p4` is in PATH. Set `LAZYP4_TEST_P4D` to a `p4d` executable to also run server integration tests against temporary loopback servers and workspaces.
 
 ## License
 

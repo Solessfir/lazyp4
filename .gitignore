@@ -32,7 +32,7 @@ go.work.sum
 .vscode/
 
 # Built binaries
-lazyp4
+/lazyp4
 main
 
 # Local dev Perforce server (not needed by end users)
