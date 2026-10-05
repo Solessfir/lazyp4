@@ -12,13 +12,19 @@ A terminal UI for [Perforce P4](https://www.perforce.com/products/helix-core), i
 
 ## Installation
 
-Download the release archive for your OS and architecture from [GitHub Releases](https://github.com/Solessfir/lazyp4/releases). Extract `lazyp4` (`lazyp4.exe` on Windows) and place it in a directory on `PATH`.
-
 On Windows, once the package is available in WinGet:
 
 ```powershell
 winget install --exact --id Solessfir.lazyp4
 ```
+
+On Linux, install the latest release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Solessfir/lazyp4/main/install.sh | sh
+```
+
+To choose another directory, run the downloaded script as `sh install.sh /your/bin`.
 
 Or install with Go:
 
@@ -27,6 +33,8 @@ go install github.com/solessfir/lazyp4/cmd/lazyp4@latest
 ```
 
 The executable is installed in `GOBIN`, or `GOPATH/bin` when `GOBIN` is unset. Add that directory to `PATH`.
+
+Download the release archive for your OS and architecture from [GitHub Releases](https://github.com/Solessfir/lazyp4/releases). Extract `lazyp4` (`lazyp4.exe` on Windows) and place it in a directory on `PATH`.
 
 Or build the current `main` branch from source:
 
