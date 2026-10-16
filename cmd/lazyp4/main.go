@@ -14,6 +14,12 @@ import (
 )
 
 func main() {
+	// Without a terminal there is nothing to show, so this is a clean exit rather than a failure.
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Fprintln(os.Stderr, "lazyp4 is an interactive TUI, run it in a terminal")
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
